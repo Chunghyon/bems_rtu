@@ -1,0 +1,5 @@
+
+cd D:\Projects\Projects_ESP32\Projects_ESP32_VS\smart_lm_main\components\audio_prompts
+python mk_audio_tone.py -f D:\Projects\Projects_ESP32\Projects_ESP32_VS\smart_lm_main\components\audio_prompts -c prompts_uri.c -H prompts_uri.h -r D:\Projects\Projects_ESP32\Projects_ESP32_VS\smart_lm_main\components\audio_prompts\resource -t audio_prompts.bin -F 0 -v 1.0
+
+(python mk_audio_tone.py -f source_폴더 -c audio_tone_uri.c -H audio_tone_uri.h -r 리소스_폴더 -t audio_tone.bin -F 0 -v 1.0)

@@ -1,0 +1,8 @@
+# png files
+*.png
+
+# olf files
+*.old
+
+# Build files
+build/

@@ -1,0 +1,43 @@
+# Name,Type,SubType,Offset,Size,Flags
+# Note: if you change the phy_init or app partition offset,make sure to change the offset in Kconfig.projbuild
+# 0x0000~0x0FFF: Reserved, Not used
+# 0x1000~0x7FFF: Bootloader, auto reserved
+# 0x8000~0x8FFF: Partition Table, auto reserved
+# 1. Type: app
+# SubType	값		설명
+# factory	0x00	기본 앱(Factory)
+# ota_0		0x10	OTA 업데이트 슬롯 0
+# ota_1		0x11	OTA 업데이트 슬롯 1
+# test		0x20	테스트 앱
+
+# 2. Type: data
+# SubType	값		설명
+# ota		0x00	OTA 데이터(업데이트 정보)
+# phy		0x01	PHY 초기화 데이터
+# nvs		0x02	NVS(비휘발성 저장소)
+# coredump	0x03	코어덤프 데이터
+# nvs_keys  0x04
+# efuse		0x05
+# undefined 0x06
+# esphttpd	0x80	ESPHTTPD 웹서버 데이터
+# fat		0x81	FAT 파일 시스템
+# spiffs	0x82	SPIFFS 파일 시스템
+# littlefs	0x83	EEPROM 에뮬레이션
+# tee_ota	0x90
+# custom	0xFF	사용자 정의
+
+# 3. Type: 기타
+# Type		값		설명
+# 0x00		app		애플리케이션 파티션
+# 0x01		data	데이터 파티션
+# 0x40~0xFE	custom	사용자 정의 타입
+
+otadata,  	data, ota,    0x9000,   0x2000,
+phy_init, 	data, phy,    0xb000,   0x1000,
+nvs,      	data, nvs,    0x100000, 1M,
+ota_0,    	app,  ota_0,  0x200000, 2M,
+ota_1,    	app,  ota_1,  0x400000, 2M,
+# total rest size is 10M
+model,      data, spiffs,         , 1M,
+prompts,	data, 0x27,   		  , 1M,
+storage,  	data, littlefs, 	  , 8M,
