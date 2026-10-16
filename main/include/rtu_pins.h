@@ -58,4 +58,9 @@
 #define LED_STATUS_GREEN        GPIO_NUM_39
 #define LED_STATUS_RED          GPIO_NUM_40
 
+// ========== I2C to control PCA9555PWR ==========
+#define I2C_SDA_PIN             GPIO_NUM_8
+#define I2C_SCL_PIN             GPIO_NUM_9
+#define PCA9555_IO_INT_PIN    	GPIO_NUM_42
+
 #endif // RTU_PINS_H_
