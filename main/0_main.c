@@ -1,306 +1,286 @@
+/**
+ * BEMS RTU - ESP32-S3 Implementation
+ * 
+ * Based on design report: 한국형_전력_수도_온수_태양광_RTU_ADC_설계_리포트_개정.docx
+ * Architecture: Communication-first (RS-485/Modbus) + Pulse capture + Analog + (optional) high-speed power sampling
+ * 
+ * Features:
+ * - W5500 Ethernet initialization (SPI)
+ * - Basic HTTP web server showing status
+ * - Pulse inputs (GPIO interrupt)
+ * - RS-485 UART init
+ * - Basic ADC
+ * 
+ * Pin mappings are in rtu_pins.h — update them to match the schematic.
+ */
 
-#include "string.h"
-#include "freertos/FreeRTOSConfig.h"
+#include <stdio.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
 #include "freertos/queue.h"
-#include "freertos/semphr.h"
-
-#include "xtensa/core-macros.h"
-
 #include "esp_system.h"
-#include "esp_event.h"
 #include "esp_log.h"
-#include "esp_wifi.h"
-#include "esp_eth.h"
-#include "esp_task_wdt.h"
-
-#include "driver/uart.h"
-#include "driver/gpio.h"
-
-#include "soc/uart_struct.h"
+#include "esp_event.h"
+#include "esp_netif.h"
 #include "nvs_flash.h"
+#include "driver/gpio.h"
+#include "driver/uart.h"
+#include "driver/spi_master.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_eth.h"
+#include "esp_eth_mac.h"
+#include "esp_eth_phy.h"
+#include "esp_http_server.h"
 
-#include "lwip/api.h"
-#include "lwip/err.h"
-#include "lwip/netdb.h"
-#include "lwip/ip.h"
+#include "rtu_pins.h"
 
-#include "hh_EMC_process.h"
-#include "hh_parameters.h"
-#include "hh_util.h"
-#include "hh_spi.h"
-#include "hh_tcp_packet.h"
-#include "hh_ota_server.h"
-#include "hh_ledc.h"
-#include "hh_spiffs.h"
-#include "hh_littlefs.h"
-#include "hh_nvs.h"
-#include "prompts_uri.h"
+static const char *TAG = "RTU_MAIN";
 
-#include "wm8960.h"
+// ========== Pulse counters ==========
+static volatile uint32_t pulse_counts[4] = {0};
+static uint32_t pulse_last_edge_time[4] = {0};
 
-bool debug_log_on = 1;
-bool LEARNING_MODE = false;
-bool under_face_learning = false;
-
-esp_log_level_t esp_log_level = ESP_LOG_INFO;
-
-extern void task_Menu(void *pvParameters);
-extern void ff_set_loc_ip(void);
-extern void ff_eth_init(void);
-extern void ff_ble_server_config(void);
-extern void ff_init_uart0(void);
-extern void ff_init_nvs0(void);
-extern void print_loc_ip(void);
-extern void ff_door_control_init(void);
-extern void open_gate_and_start_keeping_timer(void);
-extern void ff_play_prompt(tone_type_t type);
-
-#ifdef SPI_SLAVE_ROLE
-extern void init_spi_slave(void);
-#endif
-
-uint32_t PP_CURRENT_VERSION;
-uint32_t global_eth_timestamp;
-
-extern ip_thru_ble_t frcd_ip;
-extern bool esp_restart_requested;
-extern uint32_t onepass_heartbeat_timestamp;
-extern bool onepass_server_is_connected;
-extern QueueHandle_t qhandle_to_OnepassServer;
-
-static char *TAG = "main";
-
-/**
- * GPIO configuration
- */
-void ff_gpio_setup(void)
+static void IRAM_ATTR pulse_isr_handler(void *arg)
 {
-	gpio_config_t io_conf;
-	io_conf.pin_bit_mask 	= GPIO_OUTPUT_PIN_SEL;		//bit mask of the LED pins
-	io_conf.mode 			= GPIO_MODE_OUTPUT;			//set as output mode
-	io_conf.pull_down_en 	= false;					//disable pull-down mode
-	io_conf.pull_up_en 		= true;						//disable pull-up mode
-	io_conf.intr_type 		= GPIO_INTR_DISABLE;		//disable interrupt
-	gpio_config(&io_conf);								//configure GPIO with the given settings
-
-	io_conf.pin_bit_mask 	= GPIO_INPUT_PIN_SEL;		//bit mask of interrupt pins
-	io_conf.mode 			= GPIO_MODE_INPUT;			//set as input mode
-	io_conf.pull_down_en 	= false;					//disable pull-down mode
-	io_conf.pull_up_en 		= false;					//enable pull-up mode
-	io_conf.intr_type 		= GPIO_INTR_POSEDGE;		//interrupt of rising edge
-	gpio_config(&io_conf);								//configure GPIO with the given settings
-
-	gpio_set_level(RSTn_W5500, OFF);
-	vTaskDelay(pdMS_TO_TICKS(10));
-	gpio_set_level(RSTn_W5500, ON);
-
-	gpio_set_level(RED_LED, ON);
-	gpio_set_level(SPI_CS1, ON);
-	gpio_set_level(CSB_W5500, ON);
+    int ch = (int)arg;
+    uint32_t now = xTaskGetTickCountFromISR();
+    if ((now - pulse_last_edge_time[ch]) > pdMS_TO_TICKS(5)) {
+        pulse_counts[ch]++;
+        pulse_last_edge_time[ch] = now;
+    }
 }
 
-/**
- * Run-time flash store function
- * Only one flash store-access at a time for safety
- */
-static void cc_store_to_flash(void)
+static void init_pulse_inputs(void)
 {
-	//todo: add flash store function if needed
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_POSEDGE,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    };
+
+    io_conf.pin_bit_mask = (1ULL << PULSE_INPUT_1) | (1ULL << PULSE_INPUT_2) |
+                           (1ULL << PULSE_INPUT_3) | (1ULL << PULSE_INPUT_4);
+    gpio_config(&io_conf);
+
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(PULSE_INPUT_1, pulse_isr_handler, (void*)0);
+    gpio_isr_handler_add(PULSE_INPUT_2, pulse_isr_handler, (void*)1);
+    gpio_isr_handler_add(PULSE_INPUT_3, pulse_isr_handler, (void*)2);
+    gpio_isr_handler_add(PULSE_INPUT_4, pulse_isr_handler, (void*)3);
+
+    ESP_LOGI(TAG, "Pulse inputs initialized");
 }
 
-tone_type_t tone_type_to_play = TONE_TYPE_MAX;
-
-extern void ff_wwe_init(void);
-
-#define PERIODIC_PROCESS_ENABLE			1
-
-#if PERIODIC_PROCESS_ENABLE
-static void task_periodic_process(void * arg)
+// ========== RS-485 ==========
+static void init_rs485(uart_port_t uart_num, int tx, int rx, int de_re)
 {
-	uint32_t period_random;
+    uart_config_t uart_config = {
+        .baud_rate = 9600,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    uart_driver_install(uart_num, 1024, 1024, 0, NULL, 0);
+    uart_param_config(uart_num, &uart_config);
+    uart_set_pin(uart_num, tx, rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
-	while(1)
-	{
-#ifdef OTA_USE_HTTPD
-		if(esp_restart_requested) {
-			CC_LOGN("esp_restart_requested, reboot!!\n");
-			vTaskDelay(pdMS_TO_TICKS(1000));
-			esp_restart();
-		}
-#endif
-		if(is_Time_Elapsed(global_eth_timestamp, pdMS_TO_TICKS(GLOBAL_TCP_TIMEOUT))) {
-			//CC_LOGW("!! global_tcp_timeout. Auto reboot in 1 sec.\n");
-			//vTaskDelay(pdMS_TO_TICKS(1000));
-			//esp_restart();
-		}
-
-		period_random = (ONEPASS_HEARTBEAT_TIME_MS/2) - ( esp_random() & ONEPASS_HEARTBEAT_RANDOMISE );
-		if(onepass_server_is_connected && ( onepass_heartbeat_timestamp == 0 || is_Time_Elapsed(onepass_heartbeat_timestamp, pdMS_TO_TICKS(period_random)) ) ) {
-			onepass_pkt_t onepass_pkt = { 0, };
-			onepass_pkt.header.opcode = ONEPASS_TCP_HEARTBEAT;
-			xQueueSendToBack( qhandle_to_OnepassServer, &onepass_pkt, pdMS_TO_TICKS(10) );
-			onepass_heartbeat_timestamp = xTaskGetTickCount();
-			//CC_LOGN("\033[1;32mHeartBeat... (period %lu ms)\n\033[1;37m", period_random);
-		}
-
-		cc_store_to_flash();
-
-		if(tone_type_to_play < TONE_TYPE_MAX) {
-			ff_play_prompt(tone_type_to_play);
-			tone_type_to_play = TONE_TYPE_MAX;
-		}
-
-		else {
-			vTaskDelay(pdMS_TO_TICKS(PERIODIC_TASK_PERIOD));
-		}
-	} //while(1)
+    if (de_re >= 0) {
+        gpio_set_direction(de_re, GPIO_MODE_OUTPUT);
+        gpio_set_level(de_re, 0);
+    }
+    ESP_LOGI(TAG, "RS-485 UART%d initialized", uart_num);
 }
-#endif
 
-/**
- * Main Task
- */
-esp_task_wdt_config_t twdt_config_short = 
+// ========== ADC ==========
+static adc_oneshot_unit_handle_t adc1_handle;
+
+static void init_adc(void)
 {
-	.timeout_ms = 5000,
-	.idle_core_mask = (1 << portNUM_PROCESSORS) - 1,    // Bitmask of all cores
-	.trigger_panic = true,
-};
+    adc_oneshot_unit_init_cfg_t init_config = {
+        .unit_id = ADC_UNIT_1,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc1_handle));
 
-esp_task_wdt_config_t twdt_config_long = // for initial NVS and SPIFFS init
+    adc_oneshot_chan_cfg_t config = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = ADC_ATTEN_DB_12,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, AI_ADC_CHANNEL_1, &config));
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, AI_ADC_CHANNEL_2, &config));
+
+    ESP_LOGI(TAG, "ADC initialized");
+}
+
+static int read_adc(adc_channel_t channel)
 {
-	.timeout_ms = 180000,
-	.idle_core_mask = (1 << portNUM_PROCESSORS) - 1,    // Bitmask of all cores
-	.trigger_panic = true,
-};
+    int raw = 0;
+    if (adc1_handle) {
+        adc_oneshot_read(adc1_handle, channel, &raw);
+    }
+    return raw;
+}
 
-#if CONFIG_HEAP_TRACING_STANDALONE
-#include "esp_heap_trace.h"
-#define NUM_RECORDS 500
-EXT_RAM_BSS_ATTR static heap_trace_record_t trace_record[NUM_RECORDS];
-#endif
+// ========== W5500 Ethernet ==========
+static esp_eth_handle_t eth_handle = NULL;
+static esp_netif_t *eth_netif = NULL;
+
+static void eth_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    if (event_base == ETH_EVENT) {
+        if (event_id == ETHERNET_EVENT_CONNECTED) {
+            ESP_LOGI(TAG, "Ethernet Link Up");
+        } else if (event_id == ETHERNET_EVENT_DISCONNECTED) {
+            ESP_LOGI(TAG, "Ethernet Link Down");
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+
+static void init_w5500(void)
+{
+    // Reset pin
+    gpio_set_direction(ETH_RST_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(ETH_RST_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(ETH_RST_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // SPI bus
+    spi_bus_config_t buscfg = {
+        .miso_io_num = ETH_SPI_MISO,
+        .mosi_io_num = ETH_SPI_MOSI,
+        .sclk_io_num = ETH_SPI_CLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
+
+    spi_device_interface_config_t devcfg = {
+        .command_bits = 16,
+        .address_bits = 8,
+        .mode = 0,
+        .clock_speed_hz = 20 * 1000 * 1000,
+        .spics_io_num = ETH_SPI_CS,
+        .queue_size = 20,
+    };
+
+    eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(SPI2_HOST, &devcfg);
+    w5500_config.int_gpio_num = ETH_INT_PIN;
+
+    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
+    phy_config.phy_addr = 1;
+    phy_config.reset_gpio_num = ETH_RST_PIN;
+
+    esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_config, &mac_config);
+    esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_config);
+
+    esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
+    ESP_ERROR_CHECK(esp_eth_driver_install(&eth_config, &eth_handle));
+
+    esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
+    eth_netif = esp_netif_new(&cfg);
+    ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
+
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &eth_event_handler, NULL));
+
+    ESP_ERROR_CHECK(esp_eth_start(eth_handle));
+    ESP_LOGI(TAG, "W5500 Ethernet initialized");
+}
+
+// ========== Simple Web Server ==========
+static esp_err_t root_get_handler(httpd_req_t *req)
+{
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>BEMS RTU</title>"
+        "<style>body{font-family:sans-serif;margin:2em;} .box{border:1px solid #ccc;padding:1em;margin:1em 0;}</style></head>"
+        "<body><h1>BEMS RTU Status</h1>"
+        "<div class='box'><h2>Pulse Counters</h2>"
+        "<p>CH1: %lu</p><p>CH2: %lu</p><p>CH3: %lu</p><p>CH4: %lu</p></div>"
+        "<div class='box'><h2>Analog Inputs</h2>"
+        "<p>AI1: %d</p><p>AI2: %d</p></div>"
+        "<p><small>ESP32-S3 RTU | Design based on Korean energy metering RTU report</small></p>"
+        "</body></html>",
+        pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3],
+        read_adc(AI_ADC_CHANNEL_1), read_adc(AI_ADC_CHANNEL_2));
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static void start_webserver(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 80;
+
+    httpd_handle_t server = NULL;
+    if (httpd_start(&server, &config) == ESP_OK) {
+        httpd_uri_t uri_get = {
+            .uri = "/",
+            .method = HTTP_GET,
+            .handler = root_get_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &uri_get);
+        ESP_LOGI(TAG, "Web server started on port 80");
+    } else {
+        ESP_LOGE(TAG, "Failed to start web server");
+    }
+}
+
+// ========== Periodic task ==========
+static void task_data_collection(void *arg)
+{
+    while (1) {
+        ESP_LOGI(TAG, "Pulses: %lu %lu %lu %lu | AI: %d %d",
+                 pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3],
+                 read_adc(AI_ADC_CHANNEL_1), read_adc(AI_ADC_CHANNEL_2));
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+
+// ========== LEDs ==========
+static void init_leds(void)
+{
+    gpio_set_direction(LED_STATUS_GREEN, GPIO_MODE_OUTPUT);
+    gpio_set_direction(LED_STATUS_RED, GPIO_MODE_OUTPUT);
+    gpio_set_level(LED_STATUS_GREEN, 1);
+    gpio_set_level(LED_STATUS_RED, 0);
+}
 
 void app_main(void)
 {
-	esp_err_t err;
+    ESP_LOGI(TAG, "BEMS RTU starting...");
 
-#if CONFIG_HEAP_TRACING_STANDALONE
-	heap_trace_init_standalone(trace_record, NUM_RECORDS);
-	heap_trace_start(HEAP_TRACE_ALL);
-#endif
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
 
-	//show_all_heap_info(TAG);
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-	PP_CURRENT_VERSION = (PP_YEAR*1000000 + PP_MONTH*10000 + PP_DATE*100 + PP_HOUR);
-	esp_log_level_set("*", esp_log_level);
+    init_leds();
+    init_pulse_inputs();
+    init_rs485(RS485_UART_NUM_1, RS485_TX_PIN_1, RS485_RX_PIN_1, RS485_DE_RE_PIN_1);
+    init_rs485(RS485_UART_NUM_2, RS485_TX_PIN_2, RS485_RX_PIN_2, RS485_DE_RE_PIN_2);
+    init_adc();
+    init_w5500();
+    start_webserver();
 
-	ESP_ERROR_CHECK(esp_task_wdt_init(&twdt_config_long));
+    xTaskCreate(task_data_collection, "data_collect", 4096, NULL, 5, NULL);
 
-	err = nvs_flash_init();
-	if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
-		ESP_ERROR_CHECK(nvs_flash_erase());
-		err = nvs_flash_init();
-	}
-	ESP_ERROR_CHECK( err );
-
-	//show_all_heap_info(TAG);
-	//ff_spiffs_init();
-
-	ff_littlefs_init();
-
-	ESP_ERROR_CHECK(esp_task_wdt_deinit());
-	ESP_ERROR_CHECK(esp_task_wdt_init(&twdt_config_short));
-
-	ff_init_nvs0();
-	ff_gpio_setup();
-	ff_init_uart0();
-
-	vTaskDelay(pdMS_TO_TICKS(100));
-
-	ff_ota_partition_init();
-
-	show_all_heap_info(TAG);
-
-	char * my_idf_version = "v5.5.1-145-ga2a0e0b5ca";
-	char * idf_version = (char*)esp_get_idf_version();
-
-	if(strcmp(my_idf_version, idf_version)) {
-		CC_LOGN("\r\n!! different idf_version!!\r\n");
-		CC_LOGN("   expected : [%s], read : [%s]\r\n", my_idf_version, idf_version);
-	}
-
-	CC_LOGNI("\n");
-	CC_LOGNI("********************************************\n");
-	CC_LOGNI("**   \033[1;36mSmart LobbyMaster\033[1;37m \033[1;32mv1.1 \033[1;37m(%lu)\n", PP_CURRENT_VERSION);
-	print_loc_ip();
-	CC_LOGNI("********************************************\n");
-	CC_LOGNI("\n");
-
-	vTaskDelay(pdMS_TO_TICKS(500)); //added on 20191205 in order to wait till PHY power on reset is terminated
-#if 1 //todo remove later!!
-	if(!frcd_ip.loc_ip[0]) {
-		ff_set_loc_ip();
-		while(1) {
-			vTaskDelay(pdMS_TO_TICKS(100));
-		}
-	}
-#endif
-	ff_ledc_config();
-	ff_ble_server_config();
-	ff_door_control_init();
-	//show_all_heap_info(TAG);
-
-	xTaskCreatePinnedToCore(task_periodic_process, NAME_PERIOD, STACK_PERIOD, NULL, PRIORITY_PERIOD, NULL, CORE_PERIOD);
-	vTaskDelay(pdMS_TO_TICKS(10));
-
-	if(frcd_ip.loc_ip[0]) {
-		ff_eth_init();
-		CC_LOGN("!! Forced Static IP : %d.%d.%d.%d\n", IP2STR((ip4_addr_t*)&frcd_ip.loc_ip[0]));
-		init_spi_slave();
-		vTaskDelay(pdMS_TO_TICKS(10));
-
-		xTaskCreatePinnedToCore(task_Menu, NAME_MENU, STACK_MENU, NULL, PRIORITY_MENU, NULL, CORE_MENU);
-		vTaskDelay(pdMS_TO_TICKS(10));
-	}
-	else {
-		ff_blink_Rled(100, 1000, 0x7FFFFFFF);
-		open_gate_and_start_keeping_timer();
-		ff_set_loc_ip();
-	}
-
-	if(frcd_ip.loc_ip[3] < 200) {
-		CC_LOGN("frcd_ip.loc_ip[3]=(%d) < 200, so enable LEARNING_MODE\n", frcd_ip.loc_ip[3]);
-		LEARNING_MODE = true;
-		request_spi_magic_to_master(SPI_MODE_LEARN);
-	}
-	else {
-		CC_LOGN("frcd_ip.loc_ip[3]=(%d) >= 200, so disable LEARNING_MODE\n", frcd_ip.loc_ip[3]);
-		LEARNING_MODE = false;
-		request_spi_magic_to_master(SPI_MODE_NORMAL);
-	}
-		//show_all_heap_)
-
-#if CONFIG_HEAP_TRACING_STANDALONE
-	vTaskDelay(pdMS_TO_TICKS(10000));
-	heap_trace_stop();
-	heap_trace_dump();
-#endif
-
-	ff_wwe_init();
-
-	while(1) {
-		if(tone_type_to_play < TONE_TYPE_MAX) {
-			ff_play_prompt(tone_type_to_play);
-			tone_type_to_play = TONE_TYPE_MAX;
-		} else
-		{
-			vTaskDelay(pdMS_TO_TICKS(1000));
-		}
-	} //while(1)
-
-	vTaskDelete(NULL);
+    ESP_LOGI(TAG, "RTU ready. Web server at http://<ip>/");
 }
-

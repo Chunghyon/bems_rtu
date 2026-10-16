@@ -1,4 +1,0 @@
-dependencies:
-  espressif/jsmn:
-    version: "*"
-    override_path: "../.."

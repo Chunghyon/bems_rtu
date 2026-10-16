@@ -7,7 +7,7 @@
 		"board/esp32s3-builtin.cfg"
 	],
 	"idf.flashType": "UART",
-	"idf.portWin": "COM4",
+	"idf.portWin": "COM9",
 	"idf.monitorBaudRate": "115200",
 	"idf.flashBaudRate": "921600",
 	"idf.customExtraVars": {
