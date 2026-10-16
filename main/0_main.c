@@ -28,6 +28,7 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "driver/spi_master.h"
+#include "driver/i2c.h"
 #include "esp_eth.h"
 #include "esp_eth_mac.h"
 #include "esp_eth_phy.h"
@@ -395,7 +396,65 @@ static void task_data_collection(void *arg)
     }
 }
 
-// ========== LEDs ==========
+// ========== I2C / PCA9555PWR (Relay control) ==========
+// Address: base 0x20 + (A2<<2 | A1<<1 | A0) = 0x20 + 0x01 = 0x21
+#define PCA9555_ADDR            0x21
+#define PCA9555_REG_OUTPUT0     0x02
+#define PCA9555_REG_OUTPUT1     0x03
+#define PCA9555_REG_CONFIG0     0x06
+#define PCA9555_REG_CONFIG1     0x07
+
+static esp_err_t pca9555_write_reg(uint8_t reg, uint8_t val)
+{
+    uint8_t buf[2] = {reg, val};
+    return i2c_master_write_to_device(I2C_NUM_0, PCA9555_ADDR, buf, 2, pdMS_TO_TICKS(100));
+}
+
+static void init_i2c_pca9555(void)
+{
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_SDA_PIN,
+        .scl_io_num = I2C_SCL_PIN,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = 100000,  // 100 kHz
+    };
+    ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0, &conf));
+    ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, conf.mode, 0, 0, 0));
+
+    // All pins as outputs (0 = output)
+    ESP_ERROR_CHECK(pca9555_write_reg(PCA9555_REG_CONFIG0, 0x00));
+    ESP_ERROR_CHECK(pca9555_write_reg(PCA9555_REG_CONFIG1, 0x00));
+
+    // All relays off
+    ESP_ERROR_CHECK(pca9555_write_reg(PCA9555_REG_OUTPUT0, 0x00));
+    ESP_ERROR_CHECK(pca9555_write_reg(PCA9555_REG_OUTPUT1, 0x00));
+
+    ESP_LOGI(TAG, "PCA9555PWR initialized (addr=0x%02X)", PCA9555_ADDR);
+}
+
+static void task_relay_test(void *arg)
+{
+    uint8_t relay = 0;
+    while (1) {
+        // Turn on one relay at a time (16 relays total: port0 + port1)
+        uint8_t port0 = 0, port1 = 0;
+        if (relay < 8) {
+            port0 = (1 << relay);
+        } else {
+            port1 = (1 << (relay - 8));
+        }
+
+        pca9555_write_reg(PCA9555_REG_OUTPUT0, port0);
+        pca9555_write_reg(PCA9555_REG_OUTPUT1, port1);
+
+        ESP_LOGI(TAG, "Relay %d ON (port0=0x%02X port1=0x%02X)", relay, port0, port1);
+
+        relay = (relay + 1) % 16;
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
 static void init_leds(void)
 {
     gpio_reset_pin(LED_STATUS_GREEN);
@@ -422,6 +481,8 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     init_leds();
+    init_i2c_pca9555();
+    xTaskCreate(task_relay_test, "relay_test", 4096, NULL, 4, NULL);
     init_pulse_inputs();
     init_rs485(RS485_UART_NUM_1, RS485_TX_PIN_1, RS485_RX_PIN_1, RS485_DE_RE_PIN_1);
     init_rs485(RS485_UART_NUM_2, RS485_TX_PIN_2, RS485_RX_PIN_2, RS485_DE_RE_PIN_2);
