@@ -398,10 +398,13 @@ static void task_data_collection(void *arg)
 // ========== LEDs ==========
 static void init_leds(void)
 {
+    gpio_reset_pin(LED_STATUS_GREEN);
+    gpio_reset_pin(LED_STATUS_RED);
+
     gpio_set_direction(LED_STATUS_GREEN, GPIO_MODE_OUTPUT);
     gpio_set_direction(LED_STATUS_RED, GPIO_MODE_OUTPUT);
     gpio_set_level(LED_STATUS_GREEN, 1);
-    gpio_set_level(LED_STATUS_RED, 1);
+    gpio_set_level(LED_STATUS_RED, 0);
 }
 
 void app_main(void)
