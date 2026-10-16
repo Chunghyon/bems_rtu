@@ -19,6 +19,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_event.h"
@@ -170,14 +171,98 @@ static void init_ads131m08(void)
 {
     ads131m08_reset();
 
-    // Optional: read ID register to verify communication
-    // ADS131M08 ID register is at address 0x00 (RREG command = 0xA0 | addr)
-    // Simple null command first to clear
+    // Simple null command to clear
     uint32_t id1 = ads131m08_spi_xfer(adc1_spi, 0x000000);
     ESP_LOGI(TAG, "ADS131M08 ADC1 first response: 0x%06lx", id1);
+}
 
-    // TODO: Full register configuration (gain, OSR, channel enable, etc.)
-    // Reference: ADS131M08 datasheet - RREG/WREG commands, MODE, CLOCK, GAIN registers
+// ========== ADS131M08 DRDY interrupt + 1s average ==========
+#define ADS131M08_NUM_CH    8
+static int32_t adc1_latest[ADS131M08_NUM_CH] = {0};
+static int64_t adc1_sum[ADS131M08_NUM_CH] = {0};
+static uint32_t adc1_sample_count = 0;
+static SemaphoreHandle_t drdy_sem = NULL;
+
+// Read one full frame from ADS131M08 (status + 8 channels)
+// Frame format: 24-bit status + 8 × 24-bit channel data
+static void ads131m08_read_frame(spi_device_handle_t dev, int32_t *channels)
+{
+    uint8_t tx[3 * 9] = {0};  // NULL command + 8 dummy words
+    uint8_t rx[3 * 9] = {0};
+
+    spi_transaction_t t = {
+        .length = 24 * 9,
+        .tx_buffer = tx,
+        .rx_buffer = rx,
+    };
+    spi_device_transmit(dev, &t);
+
+    // Skip status word (first 3 bytes), then 8 channels
+    for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
+        int offset = 3 + ch * 3;
+        int32_t raw = ((int32_t)rx[offset] << 16) |
+                      ((int32_t)rx[offset + 1] << 8) |
+                      rx[offset + 2];
+        // Sign extend 24-bit to 32-bit
+        if (raw & 0x800000) {
+            raw |= 0xFF000000;
+        }
+        channels[ch] = raw;
+    }
+}
+
+static void IRAM_ATTR drdy_isr_handler(void *arg)
+{
+    BaseType_t hp_task_woken = pdFALSE;
+    xSemaphoreGiveFromISR(drdy_sem, &hp_task_woken);
+    if (hp_task_woken) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static void task_ads131m08(void *arg)
+{
+    int32_t channels[ADS131M08_NUM_CH];
+    uint32_t last_log_tick = xTaskGetTickCount();
+
+    while (1) {
+        if (xSemaphoreTake(drdy_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
+            ads131m08_read_frame(adc1_spi, channels);
+
+            for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
+                adc1_sum[ch] += channels[ch];
+                adc1_latest[ch] = channels[ch];
+            }
+            adc1_sample_count++;
+        }
+
+        // Log average every 1 second
+        if ((xTaskGetTickCount() - last_log_tick) >= pdMS_TO_TICKS(1000)) {
+            if (adc1_sample_count > 0) {
+                ESP_LOGI(TAG, "ADS131M08 1s avg (%lu samples):", adc1_sample_count);
+                for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
+                    int32_t avg = (int32_t)(adc1_sum[ch] / adc1_sample_count);
+                    ESP_LOGI(TAG, "  CH%d: %ld", ch, avg);
+                    adc1_sum[ch] = 0;
+                }
+                adc1_sample_count = 0;
+            } else {
+                ESP_LOGW(TAG, "ADS131M08: no samples in last 1s");
+            }
+            last_log_tick = xTaskGetTickCount();
+        }
+    }
+}
+
+static void init_ads131m08_drdy(void)
+{
+    drdy_sem = xSemaphoreCreateBinary();
+
+    gpio_set_intr_type(ADC_DRDY_PIN, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add(ADC_DRDY_PIN, drdy_isr_handler, NULL);
+
+    xTaskCreate(task_ads131m08, "ads131m08", 4096, NULL, 6, NULL);
+    ESP_LOGI(TAG, "ADS131M08 DRDY interrupt started (falling edge)");
 }
 
 // ========== W5500 Ethernet ==========
@@ -335,6 +420,7 @@ void app_main(void)
     init_w5500();
     init_ads131m08_spi();
     init_ads131m08();
+    init_ads131m08_drdy();
     start_webserver();
 
     xTaskCreate(task_data_collection, "data_collect", 4096, NULL, 5, NULL);
