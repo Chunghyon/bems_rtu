@@ -27,7 +27,6 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "driver/spi_master.h"
-#include "esp_adc/adc_oneshot.h"
 #include "esp_eth.h"
 #include "esp_eth_mac.h"
 #include "esp_eth_phy.h"
@@ -95,33 +94,90 @@ static void init_rs485(uart_port_t uart_num, int tx, int rx, int de_re)
     ESP_LOGI(TAG, "RS-485 UART%d initialized", uart_num);
 }
 
-// ========== ADC ==========
-static adc_oneshot_unit_handle_t adc1_handle;
+// ========== ADS131M08 (external ADC) ==========
+// Note: DRDY is shared on schematic but net to ADC2 was cut.
+// Only ADC1 DRDY (ADC_DRDY_PIN) is used.
+static spi_device_handle_t adc1_spi = NULL;
+static spi_device_handle_t adc2_spi = NULL;
 
-static void init_adc(void)
+// ADS131M08 SPI: Mode 1 (CPOL=0, CPHA=1), 24-bit frames
+static void init_ads131m08_spi(void)
 {
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = ADC_UNIT_1,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc1_handle));
+    // Shared SPI bus already initialized by W5500 (ETH_SPI_HOST)
+    // Add ADC devices on the same bus
 
-    adc_oneshot_chan_cfg_t config = {
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .atten = ADC_ATTEN_DB_12,
+    spi_device_interface_config_t adc_devcfg = {
+        .command_bits = 0,
+        .address_bits = 0,
+        .dummy_bits = 0,
+        .mode = 1,                          // ADS131M08 uses SPI mode 1
+        .clock_speed_hz = 8 * 1000 * 1000,  // 8 MHz safe start
+        .spics_io_num = -1,                 // Manual CS
+        .queue_size = 4,
     };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, AI_ADC_CHANNEL_1, &config));
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, AI_ADC_CHANNEL_2, &config));
 
-    ESP_LOGI(TAG, "ADC initialized");
+    // ADC1
+    adc_devcfg.spics_io_num = ADC1_SPI_CS;
+    ESP_ERROR_CHECK(spi_bus_add_device(ETH_SPI_HOST, &adc_devcfg, &adc1_spi));
+
+    // ADC2 (CS only; DRDY net was cut)
+    adc_devcfg.spics_io_num = ADC2_SPI_CS;
+    ESP_ERROR_CHECK(spi_bus_add_device(ETH_SPI_HOST, &adc_devcfg, &adc2_spi));
+
+    // SYNC / RESET pin
+    gpio_set_direction(ADC_SYNC_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(ADC_SYNC_PIN, 1);
+
+    // DRDY pin (ADC1 only)
+    gpio_set_direction(ADC_DRDY_PIN, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(ADC_DRDY_PIN, GPIO_PULLUP_ONLY);
+
+    ESP_LOGI(TAG, "ADS131M08 SPI devices added (ADC1 CS=%d, ADC2 CS=%d, DRDY=%d, SYNC=%d)",
+             ADC1_SPI_CS, ADC2_SPI_CS, ADC_DRDY_PIN, ADC_SYNC_PIN);
 }
 
-static int read_adc(adc_channel_t channel)
+static void ads131m08_reset(void)
 {
-    int raw = 0;
-    if (adc1_handle) {
-        adc_oneshot_read(adc1_handle, channel, &raw);
-    }
-    return raw;
+    // SYNC/RESET low for > 2 us, then high
+    gpio_set_level(ADC_SYNC_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(2));
+    gpio_set_level(ADC_SYNC_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    ESP_LOGI(TAG, "ADS131M08 reset pulse sent");
+}
+
+// Basic SPI transaction helper (24-bit word)
+static uint32_t ads131m08_spi_xfer(spi_device_handle_t dev, uint32_t tx_word)
+{
+    uint8_t tx[3] = {
+        (tx_word >> 16) & 0xFF,
+        (tx_word >> 8) & 0xFF,
+        tx_word & 0xFF
+    };
+    uint8_t rx[3] = {0};
+
+    spi_transaction_t t = {
+        .length = 24,
+        .tx_buffer = tx,
+        .rx_buffer = rx,
+    };
+    spi_device_transmit(dev, &t);
+
+    return ((uint32_t)rx[0] << 16) | ((uint32_t)rx[1] << 8) | rx[2];
+}
+
+static void init_ads131m08(void)
+{
+    ads131m08_reset();
+
+    // Optional: read ID register to verify communication
+    // ADS131M08 ID register is at address 0x00 (RREG command = 0xA0 | addr)
+    // Simple null command first to clear
+    uint32_t id1 = ads131m08_spi_xfer(adc1_spi, 0x000000);
+    ESP_LOGI(TAG, "ADS131M08 ADC1 first response: 0x%06lx", id1);
+
+    // TODO: Full register configuration (gain, OSR, channel enable, etc.)
+    // Reference: ADS131M08 datasheet - RREG/WREG commands, MODE, CLOCK, GAIN registers
 }
 
 // ========== W5500 Ethernet ==========
@@ -206,12 +262,13 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<body><h1>BEMS RTU Status</h1>"
         "<div class='box'><h2>Pulse Counters</h2>"
         "<p>CH1: %lu</p><p>CH2: %lu</p><p>CH3: %lu</p><p>CH4: %lu</p></div>"
-        "<div class='box'><h2>Analog Inputs</h2>"
-        "<p>AI1: %d</p><p>AI2: %d</p></div>"
+        "<div class='box'><h2>Analog Inputs (ADS131M08)</h2>"
+        "<p>ADC1 / ADC2 external 24-bit ADC</p>"
+        "<p>DRDY pin: %d (ADC1 only, ADC2 net cut)</p></div>"
         "<p><small>ESP32-S3 RTU | Design based on Korean energy metering RTU report</small></p>"
         "</body></html>",
         pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3],
-        read_adc(AI_ADC_CHANNEL_1), read_adc(AI_ADC_CHANNEL_2));
+        ADC_DRDY_PIN);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
@@ -242,9 +299,8 @@ static void start_webserver(void)
 static void task_data_collection(void *arg)
 {
     while (1) {
-        ESP_LOGI(TAG, "Pulses: %lu %lu %lu %lu | AI: %d %d",
-                 pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3],
-                 read_adc(AI_ADC_CHANNEL_1), read_adc(AI_ADC_CHANNEL_2));
+        ESP_LOGI(TAG, "Pulses: %lu %lu %lu %lu",
+                 pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3]);
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }
@@ -276,8 +332,9 @@ void app_main(void)
     init_pulse_inputs();
     init_rs485(RS485_UART_NUM_1, RS485_TX_PIN_1, RS485_RX_PIN_1, RS485_DE_RE_PIN_1);
     init_rs485(RS485_UART_NUM_2, RS485_TX_PIN_2, RS485_RX_PIN_2, RS485_DE_RE_PIN_2);
-    init_adc();
     init_w5500();
+    init_ads131m08_spi();
+    init_ads131m08();
     start_webserver();
 
     xTaskCreate(task_data_collection, "data_collect", 4096, NULL, 5, NULL);
