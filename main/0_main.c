@@ -160,18 +160,18 @@ static void init_w5500(void)
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
     };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    ESP_ERROR_CHECK(spi_bus_initialize(ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
     spi_device_interface_config_t devcfg = {
         .command_bits = 16,
         .address_bits = 8,
         .mode = 0,
-        .clock_speed_hz = 20 * 1000 * 1000,
+        .clock_speed_hz = 16 * 1000 * 1000,
         .spics_io_num = ETH_SPI_CS,
         .queue_size = 20,
     };
 
-    eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(SPI2_HOST, &devcfg);
+    eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(ETH_SPI_HOST, &devcfg);
     w5500_config.int_gpio_num = ETH_INT_PIN;
 
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
