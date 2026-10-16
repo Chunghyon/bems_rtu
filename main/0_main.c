@@ -236,8 +236,13 @@ static void task_ads131m08(void *arg)
             adc1_sample_count++;
         }
 
-        // Log average every 1 second
+        // Log average every 1 second + blink RED LED
         if ((xTaskGetTickCount() - last_log_tick) >= pdMS_TO_TICKS(1000)) {
+            // Toggle RED LED
+            static bool red_on = false;
+            red_on = !red_on;
+            gpio_set_level(LED_STATUS_RED, red_on ? 1 : 0);
+
             if (adc1_sample_count > 0) {
                 ESP_LOGI(TAG, "ADS131M08 1s avg (%lu samples):", adc1_sample_count);
                 for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
@@ -396,7 +401,7 @@ static void init_leds(void)
     gpio_set_direction(LED_STATUS_GREEN, GPIO_MODE_OUTPUT);
     gpio_set_direction(LED_STATUS_RED, GPIO_MODE_OUTPUT);
     gpio_set_level(LED_STATUS_GREEN, 1);
-    gpio_set_level(LED_STATUS_RED, 0);
+    gpio_set_level(LED_STATUS_RED, 1);
 }
 
 void app_main(void)

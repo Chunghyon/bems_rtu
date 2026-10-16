@@ -17,6 +17,7 @@
 #include "driver/uart.h"
 
 // Common SPI pins observed in schematic context
+#define ETH_SPI_HOST			SPI2_HOST
 #define ETH_SPI_MOSI            GPIO_NUM_11
 #define ETH_SPI_MISO            GPIO_NUM_13
 #define ETH_SPI_CLK             GPIO_NUM_12
@@ -57,5 +58,4 @@
 #define LED_STATUS_GREEN        GPIO_NUM_39
 #define LED_STATUS_RED          GPIO_NUM_40
 
-#define ETH_SPI_HOST			SPI2_HOST
 #endif // RTU_PINS_H_
