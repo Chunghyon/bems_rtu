@@ -255,7 +255,7 @@ static void init_w5500(void)
 // ========== Simple Web Server ==========
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
-    char buf[512];
+    char buf[1024];
     snprintf(buf, sizeof(buf),
         "<!DOCTYPE html><html><head><meta charset='utf-8'><title>BEMS RTU</title>"
         "<style>body{font-family:sans-serif;margin:2em;} .box{border:1px solid #ccc;padding:1em;margin:1em 0;}</style></head>"
