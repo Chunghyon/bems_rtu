@@ -434,11 +434,20 @@ static void init_i2c_pca9555(void)
     ESP_LOGI(TAG, "PCA9555PWR initialized (addr=0x%02X)", PCA9555_ADDR);
 }
 
+static volatile bool relay_test_enabled = false;
+
 static void task_relay_test(void *arg)
 {
     uint8_t relay = 0;
     while (1) {
-        // Turn on one relay at a time (16 relays total: port0 + port1)
+        if (!relay_test_enabled) {
+            // Ensure all relays off when disabled
+            pca9555_write_reg(PCA9555_REG_OUTPUT0, 0x00);
+            pca9555_write_reg(PCA9555_REG_OUTPUT1, 0x00);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
         uint8_t port0 = 0, port1 = 0;
         if (relay < 8) {
             port0 = (1 << relay);
@@ -453,6 +462,71 @@ static void task_relay_test(void *arg)
 
         relay = (relay + 1) % 16;
         vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+// ========== Console command handlers ==========
+static void cmd_relay_toggle(void)
+{
+    relay_test_enabled = !relay_test_enabled;
+    ESP_LOGI(TAG, "Relay test %s", relay_test_enabled ? "ENABLED" : "DISABLED");
+    if (!relay_test_enabled) {
+        pca9555_write_reg(PCA9555_REG_OUTPUT0, 0x00);
+        pca9555_write_reg(PCA9555_REG_OUTPUT1, 0x00);
+    }
+}
+
+static void cmd_dummy_1(void)
+{
+    ESP_LOGI(TAG, "[DUMMY1] Test command 1 executed");
+    static bool toggle = false;
+    pca9555_write_reg(PCA9555_REG_OUTPUT0, toggle ? 0x55 : 0xAA);
+    toggle = !toggle;
+}
+
+static void cmd_dummy_2(void)
+{
+    ESP_LOGI(TAG, "[DUMMY2] Test command 2 executed");
+    static bool toggle = false;
+    pca9555_write_reg(PCA9555_REG_OUTPUT1, toggle ? 0x55 : 0xAA);
+    toggle = !toggle;
+}
+
+static void cmd_dummy_3(void)
+{
+    ESP_LOGI(TAG, "[DUMMY3] Test command 3 executed");
+}
+
+static void task_console(void *arg)
+{
+    ESP_LOGI(TAG, "Console ready. Commands: r=relay toggle, 1/2/3=dummy tests");
+    while (1) {
+        int c = getchar();
+        if (c == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        switch (c) {
+            case 'r':
+            case 'R':
+                cmd_relay_toggle();
+                break;
+            case '1':
+                cmd_dummy_1();
+                break;
+            case '2':
+                cmd_dummy_2();
+                break;
+            case '3':
+                cmd_dummy_3();
+                break;
+            case '\n':
+            case '\r':
+                break;
+            default:
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, 1, 2, 3", c, c);
+                break;
+        }
     }
 }
 static void init_leds(void)
@@ -483,6 +557,7 @@ void app_main(void)
     init_leds();
     init_i2c_pca9555();
     xTaskCreate(task_relay_test, "relay_test", 4096, NULL, 4, NULL);
+    xTaskCreate(task_console, "console", 4096, NULL, 3, NULL);
     init_pulse_inputs();
     init_rs485(RS485_UART_NUM_1, RS485_TX_PIN_1, RS485_RX_PIN_1, RS485_DE_RE_PIN_1);
     init_rs485(RS485_UART_NUM_2, RS485_TX_PIN_2, RS485_RX_PIN_2, RS485_DE_RE_PIN_2);
