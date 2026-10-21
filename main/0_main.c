@@ -114,7 +114,7 @@ static void init_ads131m08_spi(void)
         .address_bits = 0,
         .dummy_bits = 0,
         .mode = 1,                          // ADS131M08 uses SPI mode 1
-        .clock_speed_hz = 8 * 1000 * 1000,  // 8 MHz safe start
+        .clock_speed_hz = ADC_SPI_CLK_SPEED_HZ,  // 8 MHz safe start
         .spics_io_num = -1,                 // Manual CS
         .queue_size = 4,
     };
@@ -362,7 +362,7 @@ static void init_w5500(void)
         .command_bits = 16,
         .address_bits = 8,
         .mode = 0,
-        .clock_speed_hz = 16 * 1000 * 1000,
+        .clock_speed_hz = ETH_SPI_CLK_SPEED_HZ,
         .spics_io_num = ETH_SPI_CS,
         .queue_size = 20,
     };

@@ -21,6 +21,7 @@
 #define ETH_SPI_MOSI            GPIO_NUM_11
 #define ETH_SPI_MISO            GPIO_NUM_13
 #define ETH_SPI_CLK             GPIO_NUM_12
+#define ETH_SPI_CLK_SPEED_HZ    8000000  // 16 MHz for W5500, can be adjusted
 
 // ========== Ethernet (W5500) ==========
 #define ETH_SPI_CS              GPIO_NUM_21 // SCSn
@@ -30,6 +31,7 @@
 // ======= ADC Common(ADS131M08) ========
 #define ADC_SYNC_PIN			GPIO_NUM_3
 #define ADC_DRDY_PIN			GPIO_NUM_46
+#define ADC_SPI_CLK_SPEED_HZ    8000000
 
 // ========== ADC1(ADS131M08) ==========
 #define ADC1_SPI_CS				GPIO_NUM_10
