@@ -38,6 +38,7 @@
 
 static const char *TAG = "RTU_MAIN";
 
+static void start_webserver(void);
 // ========== Pulse counters ==========
 static volatile uint32_t pulse_counts[4] = {0};
 static uint32_t pulse_last_edge_time[4] = {0};
@@ -315,12 +316,21 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == ETH_EVENT) {
         if (event_id == ETHERNET_EVENT_CONNECTED) {
             ESP_LOGI(TAG, "Ethernet Link Up");
+            esp_netif_dhcpc_start(eth_netif);
         } else if (event_id == ETHERNET_EVENT_DISCONNECTED) {
             ESP_LOGI(TAG, "Ethernet Link Down");
+            esp_netif_dhcpc_stop(eth_netif);
+        } else if (event_id == ETHERNET_EVENT_START) {
+            ESP_LOGI(TAG, "Ethernet Started");
+        } else if (event_id == ETHERNET_EVENT_STOP) {
+            ESP_LOGI(TAG, "Ethernet Stopped");
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(TAG, "Netmask: " IPSTR, IP2STR(&event->ip_info.netmask));
+        ESP_LOGI(TAG, "Gateway: " IPSTR, IP2STR(&event->ip_info.gw));
+        start_webserver();
     }
 }
 
@@ -379,7 +389,7 @@ static void init_w5500(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &eth_event_handler, NULL));
 
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
-    ESP_LOGI(TAG, "W5500 Ethernet initialized");
+    ESP_LOGI(TAG, "W5500 Ethernet initialized (waiting for link + DHCP)");
 }
 
 // ========== Simple Web Server ==========
@@ -429,6 +439,10 @@ static void start_webserver(void)
 static void task_data_collection(void *arg)
 {
     while (1) {
+        if(!adc_log_enabled) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
         ESP_LOGI(TAG, "Pulses: %lu %lu %lu %lu",
                  pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3]);
         vTaskDelay(pdMS_TO_TICKS(10000));
@@ -625,6 +639,5 @@ void app_main(void)
  
     xTaskCreate(task_data_collection, "data_collect", 4096, NULL, 5, NULL);
 
-    start_webserver();
-    ESP_LOGI(TAG, "RTU ready. Web server at http://<ip>/");
+    ESP_LOGI(TAG, "RTU ready. Web server will start after Ethernet gets IP.");
 }
