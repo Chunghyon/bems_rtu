@@ -175,6 +175,9 @@ static void init_ads131m08(void)
     // Simple null command to clear
     uint32_t id1 = ads131m08_spi_xfer(adc1_spi, 0x000000);
     ESP_LOGI(TAG, "ADS131M08 ADC1 first response: 0x%06lx", id1);
+
+    uint32_t id2 = ads131m08_spi_xfer(adc2_spi, 0x000000);
+    ESP_LOGI(TAG, "ADS131M08 ADC2 first response: 0x%06lx", id2);
 }
 
 // ========== ADS131M08 DRDY interrupt + 1s average ==========
@@ -182,6 +185,10 @@ static void init_ads131m08(void)
 static int32_t adc1_latest[ADS131M08_NUM_CH] = {0};
 static int64_t adc1_sum[ADS131M08_NUM_CH] = {0};
 static uint32_t adc1_sample_count = 0;
+
+static int32_t adc2_latest[ADS131M08_NUM_CH] = {0};
+static int64_t adc2_sum[ADS131M08_NUM_CH] = {0};
+static uint32_t adc2_sample_count = 0;
 static SemaphoreHandle_t drdy_sem = NULL;
 
 // Read one full frame from ADS131M08 (status + 8 channels)
@@ -221,23 +228,37 @@ static void IRAM_ATTR drdy_isr_handler(void *arg)
     }
 }
 
+bool adc_log_enabled = false;
 static void task_ads131m08(void *arg)
 {
     int32_t channels[ADS131M08_NUM_CH];
     uint32_t last_log_tick = xTaskGetTickCount();
 
     while (1) {
-        if (xSemaphoreTake(drdy_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
-            ads131m08_read_frame(adc1_spi, channels);
+        if(!adc_log_enabled) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
 
+        if (xSemaphoreTake(drdy_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
+            // Read ADC1 (triggered by DRDY)
+            ads131m08_read_frame(adc1_spi, channels);
             for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
                 adc1_sum[ch] += channels[ch];
                 adc1_latest[ch] = channels[ch];
             }
             adc1_sample_count++;
+
+            // Read ADC2 on the same DRDY (shared conversion timing)
+            ads131m08_read_frame(adc2_spi, channels);
+            for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
+                adc2_sum[ch] += channels[ch];
+                adc2_latest[ch] = channels[ch];
+            }
+            adc2_sample_count++;
         }
 
-        // Log average every 1 second + blink RED LED
+        // Log average every 1 second
         if ((xTaskGetTickCount() - last_log_tick) >= pdMS_TO_TICKS(1000)) {
             // Toggle RED LED
             static bool red_on = false;
@@ -245,16 +266,29 @@ static void task_ads131m08(void *arg)
             gpio_set_level(LED_STATUS_RED, red_on ? 1 : 0);
 
             if (adc1_sample_count > 0) {
-                ESP_LOGI(TAG, "ADS131M08 1s avg (%lu samples):", adc1_sample_count);
+                ESP_LOGI(TAG, "ADC1 1s avg (%lu samples):", adc1_sample_count);
                 for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
                     int32_t avg = (int32_t)(adc1_sum[ch] / adc1_sample_count);
-                    ESP_LOGI(TAG, "  CH%d: %ld", ch, avg);
+                    ESP_LOGI(TAG, "  ADC1 CH%d: %ld", ch, avg);
                     adc1_sum[ch] = 0;
                 }
                 adc1_sample_count = 0;
             } else {
-                ESP_LOGW(TAG, "ADS131M08: no samples in last 1s");
+                ESP_LOGW(TAG, "ADC1: no samples in last 1s");
             }
+
+            if (adc2_sample_count > 0) {
+                ESP_LOGI(TAG, "ADC2 1s avg (%lu samples):", adc2_sample_count);
+                for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
+                    int32_t avg = (int32_t)(adc2_sum[ch] / adc2_sample_count);
+                    ESP_LOGI(TAG, "  ADC2 CH%d: %ld", ch, avg);
+                    adc2_sum[ch] = 0;
+                }
+                adc2_sample_count = 0;
+            } else {
+                ESP_LOGW(TAG, "ADC2: no samples in last 1s");
+            }
+
             last_log_tick = xTaskGetTickCount();
         }
     }
@@ -512,6 +546,11 @@ static void task_console(void *arg)
             continue;
         }
         switch (c) {
+            case 'a':
+            case 'A':
+                adc_log_enabled = !adc_log_enabled;
+                ESP_LOGI(TAG, "ADC logging %s", adc_log_enabled ? "ENABLED" : "DISABLED");
+                break;
             case 'r':
             case 'R':
                 cmd_relay_toggle();
@@ -536,6 +575,9 @@ static void task_console(void *arg)
 }
 static void init_leds_gpio(void)
 {
+    gpio_reset_pin(ADC_SYNC_PIN);
+    gpio_reset_pin(ADC_DRDY_PIN);
+
     gpio_reset_pin(ADC1_SPI_CS);
     gpio_reset_pin(ADC2_SPI_CS);
     gpio_set_direction(ADC1_SPI_CS, GPIO_MODE_OUTPUT);
