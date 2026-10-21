@@ -310,9 +310,6 @@ static void init_ads131m08_drdy(void)
 static esp_eth_handle_t eth_handle = NULL;
 static esp_netif_t *eth_netif = NULL;
 
-// Forward declaration
-static void task_eth_link_poll(void *arg);
-
 static void eth_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
@@ -399,41 +396,6 @@ static void init_w5500(void)
 
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
     ESP_LOGI(TAG, "W5500 Ethernet initialized (waiting for link + DHCP)");
-
-    // Start link polling task (in case INT pin doesn't fire)
-    xTaskCreate(task_eth_link_poll, "eth_link", 4096, NULL, 5, NULL);
-}
-
-// Poll W5500 link status in case interrupt doesn't fire
-static bool last_link_up = false;
-static void task_eth_link_poll(void *arg)
-{
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        if (eth_handle == NULL) continue;
-
-        eth_speed_t speed;
-        esp_err_t err = esp_eth_ioctl(eth_handle, ETH_CMD_G_SPEED, &speed);
-        bool link_up = (err == ESP_OK);
-
-        if (link_up && !last_link_up) {
-            ESP_LOGI(TAG, "Link poll: Link Up detected (speed=%d)", speed);
-            // Manually notify if event didn't fire
-            if (eth_netif) {
-                esp_netif_dhcpc_start(eth_netif);
-            }
-        } else if (!link_up && last_link_up) {
-            ESP_LOGI(TAG, "Link poll: Link Down detected");
-            if (eth_netif) {
-                esp_netif_dhcpc_stop(eth_netif);
-            }
-        }
-        last_link_up = link_up;
-
-        // Also log INT pin level for debug
-        int int_level = gpio_get_level(ETH_INT_PIN);
-        ESP_LOGI(TAG, "ETH INT pin=%d, link_up=%d", int_level, link_up);
-    }
 }
 
 // ========== Simple Web Server ==========
