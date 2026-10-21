@@ -290,16 +290,8 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-static void init_w5500(void)
+static void init_spi_bus(void)
 {
-    // Reset pin
-    gpio_set_direction(ETH_RST_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(ETH_RST_PIN, 0);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    gpio_set_level(ETH_RST_PIN, 1);
-    vTaskDelay(pdMS_TO_TICKS(50));
-
-    // SPI bus
     spi_bus_config_t buscfg = {
         .miso_io_num = ETH_SPI_MISO,
         .mosi_io_num = ETH_SPI_MOSI,
@@ -308,6 +300,19 @@ static void init_w5500(void)
         .quadhd_io_num = -1,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
+}
+
+static void init_w5500(void)
+{
+    // Reset pin
+    gpio_reset_pin(ETH_RST_PIN);
+    gpio_set_direction(ETH_RST_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(ETH_RST_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(ETH_RST_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(ETH_RST_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     spi_device_interface_config_t devcfg = {
         .command_bits = 16,
@@ -529,8 +534,15 @@ static void task_console(void *arg)
         }
     }
 }
-static void init_leds(void)
+static void init_leds_gpio(void)
 {
+    gpio_reset_pin(ADC1_SPI_CS);
+    gpio_reset_pin(ADC2_SPI_CS);
+    gpio_set_direction(ADC1_SPI_CS, GPIO_MODE_OUTPUT);
+    gpio_set_direction(ADC2_SPI_CS, GPIO_MODE_OUTPUT);
+    gpio_set_level(ADC1_SPI_CS, 1);
+    gpio_set_level(ADC2_SPI_CS, 1);
+
     gpio_reset_pin(LED_STATUS_GREEN);
     gpio_reset_pin(LED_STATUS_RED);
 
@@ -554,20 +566,23 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    init_leds();
+    init_leds_gpio();
     init_i2c_pca9555();
     xTaskCreate(task_relay_test, "relay_test", 4096, NULL, 4, NULL);
     xTaskCreate(task_console, "console", 4096, NULL, 3, NULL);
     init_pulse_inputs();
     init_rs485(RS485_UART_NUM_1, RS485_TX_PIN_1, RS485_RX_PIN_1, RS485_DE_RE_PIN_1);
     init_rs485(RS485_UART_NUM_2, RS485_TX_PIN_2, RS485_RX_PIN_2, RS485_DE_RE_PIN_2);
+
+    init_spi_bus();
+
     init_w5500();
     init_ads131m08_spi();
     init_ads131m08();
     init_ads131m08_drdy();
-    start_webserver();
-
+ 
     xTaskCreate(task_data_collection, "data_collect", 4096, NULL, 5, NULL);
 
+    start_webserver();
     ESP_LOGI(TAG, "RTU ready. Web server at http://<ip>/");
 }
