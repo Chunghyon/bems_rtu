@@ -186,10 +186,12 @@ static void init_ads131m08(void)
 static int32_t adc1_latest[ADS131M08_NUM_CH] = {0};
 static int64_t adc1_sum[ADS131M08_NUM_CH] = {0};
 static uint32_t adc1_sample_count = 0;
+static int32_t adc1_avg[ADS131M08_NUM_CH] = {0};
 
 static int32_t adc2_latest[ADS131M08_NUM_CH] = {0};
 static int64_t adc2_sum[ADS131M08_NUM_CH] = {0};
 static uint32_t adc2_sample_count = 0;
+static int32_t adc2_avg[ADS131M08_NUM_CH] = {0};
 static SemaphoreHandle_t drdy_sem = NULL;
 
 // Read one full frame from ADS131M08 (status + 8 channels)
@@ -230,17 +232,14 @@ static void IRAM_ATTR drdy_isr_handler(void *arg)
 }
 
 bool adc_log_enabled = false;
+bool web_update_enabled = false;
 static void task_ads131m08(void *arg)
 {
     int32_t channels[ADS131M08_NUM_CH];
     uint32_t last_log_tick = xTaskGetTickCount();
 
     while (1) {
-        if(!adc_log_enabled) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
-
+        // Always sense, regardless of log/web settings
         if (xSemaphoreTake(drdy_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
             // Read ADC1 (triggered by DRDY)
             ads131m08_read_frame(adc1_spi, channels);
@@ -250,7 +249,7 @@ static void task_ads131m08(void *arg)
             }
             adc1_sample_count++;
 
-            // Read ADC2 on the same DRDY (shared conversion timing)
+            // Read ADC2 on the same DRDY
             ads131m08_read_frame(adc2_spi, channels);
             for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
                 adc2_sum[ch] += channels[ch];
@@ -259,35 +258,38 @@ static void task_ads131m08(void *arg)
             adc2_sample_count++;
         }
 
-        // Log average every 1 second
+        // Compute 1s average always; log only if enabled
         if ((xTaskGetTickCount() - last_log_tick) >= pdMS_TO_TICKS(1000)) {
-            // Toggle RED LED
             static bool red_on = false;
             red_on = !red_on;
             gpio_set_level(LED_STATUS_RED, red_on ? 1 : 0);
 
             if (adc1_sample_count > 0) {
-                ESP_LOGI(TAG, "ADC1 1s avg (%lu samples):", adc1_sample_count);
                 for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
-                    int32_t avg = (int32_t)(adc1_sum[ch] / adc1_sample_count);
-                    ESP_LOGI(TAG, "  ADC1 CH%d: %ld", ch, avg);
+                    adc1_avg[ch] = (int32_t)(adc1_sum[ch] / adc1_sample_count);
                     adc1_sum[ch] = 0;
                 }
+                if (adc_log_enabled) {
+                    ESP_LOGI(TAG, "ADC1 1s avg (%lu samples):", adc1_sample_count);
+                    for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
+                        ESP_LOGI(TAG, "  ADC1 CH%d: %ld", ch, adc1_avg[ch]);
+                    }
+                }
                 adc1_sample_count = 0;
-            } else {
-                ESP_LOGW(TAG, "ADC1: no samples in last 1s");
             }
 
             if (adc2_sample_count > 0) {
-                ESP_LOGI(TAG, "ADC2 1s avg (%lu samples):", adc2_sample_count);
                 for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
-                    int32_t avg = (int32_t)(adc2_sum[ch] / adc2_sample_count);
-                    ESP_LOGI(TAG, "  ADC2 CH%d: %ld", ch, avg);
+                    adc2_avg[ch] = (int32_t)(adc2_sum[ch] / adc2_sample_count);
                     adc2_sum[ch] = 0;
                 }
+                if (adc_log_enabled) {
+                    ESP_LOGI(TAG, "ADC2 1s avg (%lu samples):", adc2_sample_count);
+                    for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
+                        ESP_LOGI(TAG, "  ADC2 CH%d: %ld", ch, adc2_avg[ch]);
+                    }
+                }
                 adc2_sample_count = 0;
-            } else {
-                ESP_LOGW(TAG, "ADC2: no samples in last 1s");
             }
 
             last_log_tick = xTaskGetTickCount();
@@ -401,23 +403,59 @@ static void init_w5500(void)
 // ========== Simple Web Server ==========
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
-    char buf[1024];
-    snprintf(buf, sizeof(buf),
-        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>BEMS RTU</title>"
-        "<style>body{font-family:sans-serif;margin:2em;} .box{border:1px solid #ccc;padding:1em;margin:1em 0;}</style></head>"
+    // Use heap to avoid httpd stack overflow
+    char *buf = malloc(2048);
+    if (!buf) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    const char *refresh = web_update_enabled
+        ? "<meta http-equiv='refresh' content='5'>"
+        : "";
+
+    int len = snprintf(buf, 2048,
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>%s"
+        "<title>BEMS RTU</title>"
+        "<style>"
+        "body{font-family:sans-serif;margin:1em;}"
+        ".row{display:flex;gap:1em;flex-wrap:nowrap;}"
+        ".box{border:1px solid #ccc;padding:0.5em 1em;flex:1;min-width:0;}"
+        "table{border-collapse:collapse;width:100%%;}"
+        "td,th{border:1px solid #ddd;padding:2px 6px;text-align:right;font-size:0.9em;}"
+        "h1{margin:0 0 0.3em 0;font-size:1.3em;}"
+        "h2{margin:0 0 0.3em 0;font-size:1em;}"
+        "</style></head>"
         "<body><h1>BEMS RTU Status</h1>"
+        "<p style='margin:0 0 0.5em 0;'><small>Web update: %s</small></p>"
+        "<div class='row'>"
         "<div class='box'><h2>Pulse Counters</h2>"
-        "<p>CH1: %lu</p><p>CH2: %lu</p><p>CH3: %lu</p><p>CH4: %lu</p></div>"
-        "<div class='box'><h2>Analog Inputs (ADS131M08)</h2>"
-        "<p>ADC1 / ADC2 external 24-bit ADC</p>"
-        "<p>DRDY pin: %d (ADC1 only, ADC2 net cut)</p></div>"
-        "<p><small>ESP32-S3 RTU | Design based on Korean energy metering RTU report</small></p>"
-        "</body></html>",
-        pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3],
-        ADC_DRDY_PIN);
+        "<table><tr><th>CH</th><th>Count</th></tr>"
+        "<tr><td>1</td><td>%lu</td></tr><tr><td>2</td><td>%lu</td></tr>"
+        "<tr><td>3</td><td>%lu</td></tr><tr><td>4</td><td>%lu</td></tr></table></div>"
+        "<div class='box'><h2>ADC1 (1s avg)</h2><table><tr><th>CH</th><th>Value</th></tr>",
+        refresh,
+        web_update_enabled ? "ON (5s)" : "OFF",
+        pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3]);
+
+    for (int ch = 0; ch < ADS131M08_NUM_CH && len < 2048 - 64; ch++) {
+        len += snprintf(buf + len, 2048 - len,
+                        "<tr><td>%d</td><td>%ld</td></tr>", ch, adc1_avg[ch]);
+    }
+    len += snprintf(buf + len, 2048 - len, "</table></div>"
+        "<div class='box'><h2>ADC2 (1s avg)</h2><table><tr><th>CH</th><th>Value</th></tr>");
+
+    for (int ch = 0; ch < ADS131M08_NUM_CH && len < 2048 - 64; ch++) {
+        len += snprintf(buf + len, 2048 - len,
+                        "<tr><td>%d</td><td>%ld</td></tr>", ch, adc2_avg[ch]);
+    }
+    len += snprintf(buf + len, 2048 - len,
+        "</table></div></div>"
+        "<p><small>ESP32-S3 RTU</small></p></body></html>");
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
+    free(buf);
     return ESP_OK;
 }
 
@@ -425,6 +463,7 @@ static void start_webserver(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
+    config.stack_size = 8192;  // increase to avoid overflow
 
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) == ESP_OK) {
@@ -445,12 +484,10 @@ static void start_webserver(void)
 static void task_data_collection(void *arg)
 {
     while (1) {
-        if(!adc_log_enabled) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
+        if (adc_log_enabled) {
+            ESP_LOGI(TAG, "Pulses: %lu %lu %lu %lu",
+                pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3]);
         }
-        ESP_LOGI(TAG, "Pulses: %lu %lu %lu %lu",
-            pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3]);
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }
@@ -558,7 +595,7 @@ static void cmd_dummy_3(void)
 
 static void task_console(void *arg)
 {
-    ESP_LOGI(TAG, "Console ready. Commands: r=relay toggle, 1/2/3=dummy tests");
+    ESP_LOGI(TAG, "Console ready. Commands: r=relay, a=ADC log, w=web update, 1/2/3=dummy");
     while (1) {
         int c = getchar();
         if (c == EOF) {
@@ -570,6 +607,11 @@ static void task_console(void *arg)
             case 'A':
                 adc_log_enabled = !adc_log_enabled;
                 ESP_LOGI(TAG, "ADC logging %s", adc_log_enabled ? "ENABLED" : "DISABLED");
+                break;
+            case 'w':
+            case 'W':
+                web_update_enabled = !web_update_enabled;
+                ESP_LOGI(TAG, "Web update %s", web_update_enabled ? "ENABLED" : "DISABLED");
                 break;
             case 'r':
             case 'R':
