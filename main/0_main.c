@@ -194,24 +194,46 @@ static void ads131m08_clear_fifo(spi_device_handle_t dev)
     spi_device_transmit(dev, &t);
 }
 
+static uint16_t ads131m08_osr_to_clock(uint16_t osr, bool channels_on)
+{
+    // CLOCK[4:2] = OSR code
+    uint16_t osr_code = 5;  // default 4096
+    switch (osr) {
+        case 128:   osr_code = 0; break;
+        case 256:   osr_code = 1; break;
+        case 512:   osr_code = 2; break;
+        case 1024:  osr_code = 3; break;
+        case 2048:  osr_code = 4; break;
+        case 4096:  osr_code = 5; break;
+        case 8192:  osr_code = 6; break;
+        case 16384: osr_code = 7; break;
+        default:    osr_code = 5; break;
+    }
+    uint16_t val = (osr_code << 2);          // bits [4:2]
+    if (channels_on) val |= 0xFF00;          // all channels enable
+    return val;
+}
+
 static void init_ads131m08(void)
 {
     ads131m08_reset();
 
-    // Datasheet sequence:
-    // 1. CLOCK (0x03): channels off + OSR_4096
-    ads131m08_write_reg(adc1_spi, 0x03, 0x0014);
-    ads131m08_write_reg(adc2_spi, 0x03, 0x0014);
+    uint16_t clk_off = ads131m08_osr_to_clock(PP_ADC_OSR, false);
+    uint16_t clk_on  = ads131m08_osr_to_clock(PP_ADC_OSR, true);
 
-    // 2. MODE (0x02): clear RESET (0x0400), SPI timeout (0x0010)
+    // 1. CLOCK: channels off + OSR
+    ads131m08_write_reg(adc1_spi, 0x03, clk_off);
+    ads131m08_write_reg(adc2_spi, 0x03, clk_off);
+
+    // 2. MODE: clear RESET, SPI timeout
     ads131m08_write_reg(adc1_spi, 0x02, 0x0410);
     ads131m08_write_reg(adc2_spi, 0x02, 0x0410);
 
-    // 3. CLOCK: all channels on (0xFF00) + OSR_4096
-    ads131m08_write_reg(adc1_spi, 0x03, 0xFF14);
-    ads131m08_write_reg(adc2_spi, 0x03, 0xFF14);
+    // 3. CLOCK: all channels on + OSR
+    ads131m08_write_reg(adc1_spi, 0x03, clk_on);
+    ads131m08_write_reg(adc2_spi, 0x03, clk_on);
 
-    ESP_LOGI(TAG, "ADS131M08 init (datasheet seq, OSR=4096)");
+    ESP_LOGI(TAG, "ADS131M08 init (OSR=%d)", PP_ADC_OSR);
 
     // Clear FIFO
     ads131m08_clear_fifo(adc1_spi);
@@ -275,31 +297,37 @@ static void task_ads131m08(void *arg)
     uint32_t last_log_tick = xTaskGetTickCount();
 
     while (1) {
-        if (xSemaphoreTake(drdy_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
-            // When web is on, sample only once every 2s to avoid SPI collision
-            if (web_update_enabled) {
-                static uint32_t last_web_sample = 0;
-                if ((xTaskGetTickCount() - last_web_sample) < pdMS_TO_TICKS(2000)) {
-                    vTaskDelay(pdMS_TO_TICKS(50));
-                    continue;
-                }
-                last_web_sample = xTaskGetTickCount();
-            }
-
-            ads131m08_read_frame(adc1_spi, channels);
-            for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
-                adc1_sum[ch] += channels[ch];
-                adc1_latest[ch] = channels[ch];
-            }
-            adc1_sample_count++;
-
-            ads131m08_read_frame(adc2_spi, channels);
-            for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
-                adc2_sum[ch] += channels[ch];
-                adc2_latest[ch] = channels[ch];
-            }
-            adc2_sample_count++;
+#if PP_ADC_USE_DRDY
+        // Wait for DRDY interrupt
+        if (xSemaphoreTake(drdy_sem, pdMS_TO_TICKS(100)) != pdTRUE) {
+            continue;
         }
+#else
+        // On-demand: read at fixed interval (no DRDY)
+        vTaskDelay(pdMS_TO_TICKS(PP_ADC_SAMPLE_MS));
+#endif
+        // When web is on, sample only once every 2s
+        if (web_update_enabled) {
+            static uint32_t last_web_sample = 0;
+            if ((xTaskGetTickCount() - last_web_sample) < pdMS_TO_TICKS(2000)) {
+                continue;
+            }
+            last_web_sample = xTaskGetTickCount();
+        }
+
+        ads131m08_read_frame(adc1_spi, channels);
+        for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
+            adc1_sum[ch] += channels[ch];
+            adc1_latest[ch] = channels[ch];
+        }
+        adc1_sample_count++;
+
+        ads131m08_read_frame(adc2_spi, channels);
+        for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
+            adc2_sum[ch] += channels[ch];
+            adc2_latest[ch] = channels[ch];
+        }
+        adc2_sample_count++;
 
         // Compute 1s average always; log only if enabled
         if ((xTaskGetTickCount() - last_log_tick) >= pdMS_TO_TICKS(1000)) {
@@ -342,13 +370,15 @@ static void task_ads131m08(void *arg)
 
 static void init_ads131m08_drdy(void)
 {
+#if PP_ADC_USE_DRDY
     drdy_sem = xSemaphoreCreateBinary();
-
     gpio_set_intr_type(ADC_DRDY_PIN, GPIO_INTR_NEGEDGE);
     gpio_isr_handler_add(ADC_DRDY_PIN, drdy_isr_handler, NULL);
-
+    ESP_LOGI(TAG, "ADS131M08 DRDY interrupt mode");
+#else
+    ESP_LOGI(TAG, "ADS131M08 on-demand mode (no DRDY)");
+#endif
     xTaskCreate(task_ads131m08, "ads131m08", 4096, NULL, 6, NULL);
-    ESP_LOGI(TAG, "ADS131M08 DRDY interrupt started (falling edge)");
 }
 
 // ========== W5500 Ethernet ==========
@@ -756,12 +786,20 @@ void app_main(void)
 
     init_spi_bus();
 
+#if PP_ENABLE_ETHERNET
     init_w5500();
+#else
+    ESP_LOGI(TAG, "Ethernet disabled (PP_ENABLE_ETHERNET=0)");
+#endif
     init_ads131m08_spi();
     init_ads131m08();
     init_ads131m08_drdy();
  
     xTaskCreate(task_data_collection, "data_collect", 4096, NULL, 5, NULL);
 
+#if PP_ENABLE_ETHERNET
     ESP_LOGI(TAG, "RTU ready. Web server will start after Ethernet gets IP.");
+#else
+    ESP_LOGI(TAG, "RTU ready (Ethernet disabled).");
+#endif
 }

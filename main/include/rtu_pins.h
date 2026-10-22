@@ -18,6 +18,19 @@
 
 #define PP_ENABLE_ETHERNET		0
 
+// ADC conversion mode: 1 = use DRDY interrupt, 0 = on-demand (timed read)
+#define PP_ADC_USE_DRDY			0
+// On-demand sample interval in milliseconds
+// Range: 1 ~ 60000 (1 ms ~ 60 s). Must be >= ADC conversion period.
+#define PP_ADC_SAMPLE_MS		250
+
+// ADC hardware OSR (oversampling ratio) — sets conversion period
+// Valid: 128, 256, 512, 1024, 2048, 4096, 8192, 16384
+// With 8.192 MHz CLKIN: data rate = 8.192e6 / (2 * OSR)
+//   128→32 kHz, 256→16 kHz, 512→8 kHz, 1024→4 kHz,
+//   2048→2 kHz, 4096→1 kHz, 8192→500 Hz, 16384→250 Hz
+#define PP_ADC_OSR				16384
+
 // Common SPI pins observed in schematic context
 #define ETH_SPI_HOST			SPI2_HOST
 #define ETH_SPI_MOSI            GPIO_NUM_11
