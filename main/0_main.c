@@ -106,8 +106,7 @@ static spi_device_handle_t adc2_spi = NULL;
 // ADS131M08 SPI: Mode 1 (CPOL=0, CPHA=1), 24-bit frames
 static void init_ads131m08_spi(void)
 {
-    // Shared SPI bus already initialized by W5500 (ETH_SPI_HOST)
-    // Add ADC devices on the same bus
+    // ADC always on SPI2_HOST (bus already initialized)
 
     spi_device_interface_config_t adc_devcfg = {
         .command_bits = 0,
@@ -121,11 +120,11 @@ static void init_ads131m08_spi(void)
 
     // ADC1
     adc_devcfg.spics_io_num = ADC1_SPI_CS;
-    ESP_ERROR_CHECK(spi_bus_add_device(ETH_SPI_HOST, &adc_devcfg, &adc1_spi));
+    ESP_ERROR_CHECK(spi_bus_add_device(ADC_SPI_HOST, &adc_devcfg, &adc1_spi));
 
     // ADC2 (CS only; DRDY net was cut)
     adc_devcfg.spics_io_num = ADC2_SPI_CS;
-    ESP_ERROR_CHECK(spi_bus_add_device(ETH_SPI_HOST, &adc_devcfg, &adc2_spi));
+    ESP_ERROR_CHECK(spi_bus_add_device(ADC_SPI_HOST, &adc_devcfg, &adc2_spi));
 
     // SYNC / RESET pin
     gpio_set_direction(ADC_SYNC_PIN, GPIO_MODE_OUTPUT);
@@ -437,16 +436,36 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-static void init_spi_bus(void)
+static void init_spi_buses(void)
 {
-    spi_bus_config_t buscfg = {
+    // Always initialize SPI2 for ADC (fixed pins)
+    spi_bus_config_t adc_buscfg = {
+        .miso_io_num = ADC_SPI_MISO,
+        .mosi_io_num = ADC_SPI_MOSI,
+        .sclk_io_num = ADC_SPI_CLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(ADC_SPI_HOST, &adc_buscfg, SPI_DMA_CH_AUTO));
+    ESP_LOGI(TAG, "ADC SPI bus ready (SPI2_HOST, MOSI=%d MISO=%d CLK=%d)",
+             ADC_SPI_MOSI, ADC_SPI_MISO, ADC_SPI_CLK);
+
+#if PP_ETH_USE_SPI3
+    // Dedicated SPI3 bus for W5500
+    spi_bus_config_t eth_buscfg = {
         .miso_io_num = ETH_SPI_MISO,
         .mosi_io_num = ETH_SPI_MOSI,
         .sclk_io_num = ETH_SPI_CLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
     };
-    ESP_ERROR_CHECK(spi_bus_initialize(ETH_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    ESP_ERROR_CHECK(spi_bus_initialize(ETH_SPI_HOST, &eth_buscfg, SPI_DMA_CH_AUTO));
+    ESP_LOGI(TAG, "ETH SPI bus ready (SPI3_HOST, MOSI=%d MISO=%d CLK=%d)",
+             ETH_SPI_MOSI, ETH_SPI_MISO, ETH_SPI_CLK);
+#else
+    ESP_LOGI(TAG, "ETH shares SPI2_HOST with ADC (MOSI=%d MISO=%d CLK=%d)",
+             ETH_SPI_MOSI, ETH_SPI_MISO, ETH_SPI_CLK);
+#endif
 }
 
 static void init_w5500(void)
@@ -490,7 +509,13 @@ static void init_w5500(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &eth_event_handler, NULL));
 
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
-    ESP_LOGI(TAG, "W5500 Ethernet initialized (waiting for link + DHCP)");
+    ESP_LOGI(TAG, "W5500 Ethernet initialized on %s (waiting for link + DHCP)",
+#if PP_ETH_USE_SPI3
+             "SPI3_HOST"
+#else
+             "SPI2_HOST (shared)"
+#endif
+             );
 }
 
 // ========== Simple Web Server ==========
@@ -784,7 +809,7 @@ void app_main(void)
     init_rs485(RS485_UART_NUM_1, RS485_TX_PIN_1, RS485_RX_PIN_1, RS485_DE_RE_PIN_1);
     init_rs485(RS485_UART_NUM_2, RS485_TX_PIN_2, RS485_RX_PIN_2, RS485_DE_RE_PIN_2);
 
-    init_spi_bus();
+    init_spi_buses();
 
 #if PP_ENABLE_ETHERNET
     init_w5500();
