@@ -36,6 +36,106 @@
 
 #include "rtu_pins.h"
 
+// ========== ADC Channel & PCA9555 Port Enums ==========
+// ADC1 channels (ADS131M08 #1) — names linked to schematic nets / function
+typedef enum {
+    ADC1_AC_CURRENT1 = 0,   // AIN0
+    ADC1_AC_CURRENT2,       // AIN1
+    ADC1_AC_CURRENT3,       // AIN2
+    ADC1_AC_VOLTAGE1,       // AIN3
+    ADC1_AC_VOLTAGE2,       // AIN4
+    ADC1_AC_VOLTAGE3,       // AIN5
+    ADC1_COMMON1,           // AIN6
+    ADC1_COMMON2,           // AIN7
+    ADC1_CH_COUNT
+} adc1_channel_t;
+
+static const char * const adc1_ch_names[ADC1_CH_COUNT] = {
+    "ADC1_CH0 (AC_CURRENT1)",
+    "ADC1_CH1 (AC_CURRENT2)",
+    "ADC1_CH2 (AC_CURRENT3)",
+    "ADC1_CH3 (AC_VOLTAGE1)",
+    "ADC1_CH4 (AC_VOLTAGE2)",
+    "ADC1_CH5 (AC_VOLTAGE3)",
+    "ADC1_CH6 (COMMON1)",
+    "ADC1_CH7 (COMMON2)"
+};
+
+// ADC2 channels (ADS131M08 #2)
+typedef enum {
+    ADC2_COMMON3 = 0,       // AIN8
+    ADC2_COMMON4,           // AIN9
+    ADC2_COMMON5,           // AIN10
+    ADC2_COMMON6,           // AIN11
+    ADC2_RESERVED1,         // AIN12
+    ADC2_RESERVED2,         // AIN13
+    ADC2_RESERVED3,         // AIN14
+    ADC2_RESERVED4,         // AIN15
+    ADC2_CH_COUNT
+} adc2_channel_t;
+
+static const char * const adc2_ch_names[ADC2_CH_COUNT] = {
+    "ADC2_CH0 (COMMON3)",
+    "ADC2_CH1 (COMMON4)",
+    "ADC2_CH2 (COMMON5)",
+    "ADC2_CH3 (COMMON6)",
+    "ADC2_CH4 (RESERVED1)",
+    "ADC2_CH5 (RESERVED2)",
+    "ADC2_CH6 (RESERVED3)",
+    "ADC2_CH7 (RESERVED4)"
+};
+
+/******************************************************************
+입력 ──[49.9 kΩ 릴레이]────[49.9 kΩ 고정]────[5 kΩ]── INA
+            │                            │
+        (릴레이로 short)               [10 kΩ]
+                                         │
+                                        GND
+*******************************************************************/
+// PCA9555PWR ports (16-bit expander, Port0=bits0-7, Port1=bits8-15)
+// Used to drive relay coils for analog/pulse path selection
+typedef enum {
+    PCA_10V_SEL1 = 0,   // PCA_PORT0_BIT0, 0 : Low Voltage input, 1 : High Voltage input
+    PCA_10V_SEL2,       // PCA_PORT0_BIT1, 0 : Low Voltage input, 1 : High Voltage input
+    PCA_10V_SEL3,       // PCA_PORT0_BIT2, 0 : Low Voltage input, 1 : High Voltage input
+    PCA_10V_SEL4,       // PCA_PORT0_BIT3, 0 : Low Voltage input, 1 : High Voltage input
+    PCA_10V_SEL5,       // PCA_PORT0_BIT4, 0 : Low Voltage input, 1 : High Voltage input
+    PCA_10V_SEL6,       // PCA_PORT0_BIT5, 0 : Low Voltage input, 1 : High Voltage input
+
+    PCA_DI_SEL1,        // PCA_PORT0_BIT6, 0 : Pulse input, 1 : Analog input
+    PCA_DI_SEL2,        // PCA_PORT0_BIT7, 0 : Pulse input, 1 : Analog input
+
+    PCA_CUR_SEL1,       // PCA_PORT1_BIT0, 0 : Current input, 1 : Voltage input
+    PCA_CUR_SEL2,       // PCA_PORT1_BIT1, 0 : Current input, 1 : Voltage input
+    PCA_CUR_SEL3,       // PCA_PORT1_BIT2, 0 : Current input, 1 : Voltage input
+    PCA_CUR_SEL4,       // PCA_PORT1_BIT3, 0 : Current input, 1 : Voltage input
+    PCA_CUR_SEL5,       // PCA_PORT1_BIT4, 0 : Current input, 1 : Voltage input
+    PCA_CUR_SEL6,       // PCA_PORT1_BIT5, 0 : Current input, 1 : Voltage input
+
+    PCA_DI_SEL3,        // PCA_PORT1_BIT6, 0 : Pulse input, 1 : Analog input
+    PCA_DI_SEL4,        // PCA_PORT1_BIT7, 0 : Pulse input, 1 : Analog input
+    PCA_PORT_COUNT
+} pca9555_port_t;
+
+static const char * const pca_port_names[PCA_PORT_COUNT] = {
+    "PCA_P0.0 (10V_SEL1)",
+    "PCA_P0.1 (10V_SEL2)",
+    "PCA_P0.2 (10V_SEL3)",
+    "PCA_P0.3 (10V_SEL4)",
+    "PCA_P0.4 (10V_SEL5)",
+    "PCA_P0.5 (10V_SEL6)",
+    "PCA_P0.6 (DI_SEL1)",
+    "PCA_P0.7 (DI_SEL2)",
+    "PCA_P1.0 (CUR_SEL1)",
+    "PCA_P1.1 (CUR_SEL2)",
+    "PCA_P1.2 (CUR_SEL3)",
+    "PCA_P1.3 (CUR_SEL4)",
+    "PCA_P1.4 (CUR_SEL5)",
+    "PCA_P1.5 (CUR_SEL6)",
+    "PCA_P1.6 (DI_SEL3)",
+    "PCA_P1.7 (DI_SEL4)"
+};
+
 static const char *TAG = "RTU_MAIN";
 
 static void start_webserver(void);
@@ -97,7 +197,6 @@ static void init_rs485(uart_port_t uart_num, int tx, int rx, int de_re)
     ESP_LOGI(TAG, "RS-485 UART%d initialized", uart_num);
 }
 
-// ========== ADS131M08 (external ADC) ==========
 // Note: DRDY is shared on schematic but net to ADC2 was cut.
 // Only ADC1 DRDY (ADC_DRDY_PIN) is used.
 static spi_device_handle_t adc1_spi = NULL;
@@ -342,7 +441,7 @@ static void task_ads131m08(void *arg)
                 if (adc_log_enabled) {
                     ESP_LOGI(TAG, "ADC1 1s avg (%lu samples):", adc1_sample_count);
                     for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
-                        ESP_LOGI(TAG, "  ADC1 CH%d: %ld", ch, adc1_avg[ch]);
+                        ESP_LOGI(TAG, "  ADC1 %s: %ld", adc1_ch_names[ch], adc1_avg[ch]);
                     }
                 }
                 adc1_sample_count = 0;
@@ -356,7 +455,7 @@ static void task_ads131m08(void *arg)
                 if (adc_log_enabled) {
                     ESP_LOGI(TAG, "ADC2 1s avg (%lu samples):", adc2_sample_count);
                     for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
-                        ESP_LOGI(TAG, "  ADC2 CH%d: %ld", ch, adc2_avg[ch]);
+                        ESP_LOGI(TAG, "  ADC2 %s: %ld", adc2_ch_names[ch], adc2_avg[ch]);
                     }
                 }
                 adc2_sample_count = 0;
@@ -556,16 +655,16 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         web_update_enabled ? "ON (5s)" : "OFF",
         pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3]);
 
-    for (int ch = 0; ch < ADS131M08_NUM_CH && len < 2048 - 64; ch++) {
+    for (int ch = 0; ch < ADS131M08_NUM_CH && len < 2048 - 80; ch++) {
         len += snprintf(buf + len, 2048 - len,
-                        "<tr><td>%d</td><td>%ld</td></tr>", ch, adc1_avg[ch]);
+                        "<tr><td>%s</td><td>%ld</td></tr>", adc1_ch_names[ch], adc1_avg[ch]);
     }
     len += snprintf(buf + len, 2048 - len, "</table></div>"
         "<div class='box'><h2>ADC2 (1s avg)</h2><table><tr><th>CH</th><th>Value</th></tr>");
 
-    for (int ch = 0; ch < ADS131M08_NUM_CH && len < 2048 - 64; ch++) {
+    for (int ch = 0; ch < ADS131M08_NUM_CH && len < 2048 - 80; ch++) {
         len += snprintf(buf + len, 2048 - len,
-                        "<tr><td>%d</td><td>%ld</td></tr>", ch, adc2_avg[ch]);
+                        "<tr><td>%s</td><td>%ld</td></tr>", adc2_ch_names[ch], adc2_avg[ch]);
     }
     len += snprintf(buf + len, 2048 - len,
         "</table></div></div>"
@@ -677,7 +776,8 @@ static void task_relay_test(void *arg)
         pca9555_write_reg(PCA9555_REG_OUTPUT0, port0);
         pca9555_write_reg(PCA9555_REG_OUTPUT1, port1);
 
-        ESP_LOGI(TAG, "Relay %d ON (port0=0x%02X port1=0x%02X)", relay, port0, port1);
+        ESP_LOGI(TAG, "Relay %d (%s) ON (port0=0x%02X port1=0x%02X)", 
+                 relay, pca_port_names[relay], port0, port1);
 
         relay = (relay + 1) % 16;
         vTaskDelay(pdMS_TO_TICKS(1000));
