@@ -28,6 +28,7 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "driver/spi_master.h"
+#include "esp_rom_sys.h"
 #include "driver/i2c.h"
 #include "esp_eth.h"
 #include "esp_eth_mac.h"
@@ -212,18 +213,22 @@ static void init_ads131m08_spi(void)
         .address_bits = 0,
         .dummy_bits = 0,
         .mode = 1,                          // ADS131M08 uses SPI mode 1
-        .clock_speed_hz = ADC_SPI_CLK_SPEED_HZ,  // 8 MHz safe start
-        .spics_io_num = -1,                 // Manual CS
+        .clock_speed_hz = ADC_SPI_CLK_SPEED_HZ,  // 8 MHz
+        .spics_io_num = -1,                 // Manual CS (driver CS timing is unreliable in mode 1)
         .queue_size = 4,
     };
 
     // ADC1
-    adc_devcfg.spics_io_num = ADC1_SPI_CS;
     ESP_ERROR_CHECK(spi_bus_add_device(ADC_SPI_HOST, &adc_devcfg, &adc1_spi));
 
     // ADC2 (CS only; DRDY net was cut)
-    adc_devcfg.spics_io_num = ADC2_SPI_CS;
     ESP_ERROR_CHECK(spi_bus_add_device(ADC_SPI_HOST, &adc_devcfg, &adc2_spi));
+
+    // Manual CS pins (active low, idle high)
+    gpio_set_direction(ADC1_SPI_CS, GPIO_MODE_OUTPUT);
+    gpio_set_level(ADC1_SPI_CS, 1);
+    gpio_set_direction(ADC2_SPI_CS, GPIO_MODE_OUTPUT);
+    gpio_set_level(ADC2_SPI_CS, 1);
 
     // SYNC / RESET pin
     gpio_set_direction(ADC_SYNC_PIN, GPIO_MODE_OUTPUT);
@@ -248,48 +253,88 @@ static void ads131m08_reset(void)
 }
 
 // ADS131M08: 10-word frame (status + 8ch + CRC), 24-bit words
+// All SPI traffic MUST be a full 30-byte frame with CS held low the entire time.
 #define ADS131M08_FRAME_WORDS   10
 #define ADS131M08_WORD_BITS     24
+#define ADS131M08_FRAME_BYTES   (3 * ADS131M08_FRAME_WORDS)
 
-static uint32_t ads131m08_spi_xfer(spi_device_handle_t dev, uint32_t tx_word)
+// Full 30-byte frame transfer with manual CS (matches reference library)
+static void ads131m08_transfer_frame(spi_device_handle_t dev, gpio_num_t cs, const uint8_t *tx, uint8_t *rx)
 {
-    uint8_t tx[3] = {
-        (tx_word >> 16) & 0xFF,
-        (tx_word >> 8) & 0xFF,
-        tx_word & 0xFF
-    };
-    uint8_t rx[3] = {0};
-
-    spi_transaction_t t = {
-        .length = ADS131M08_WORD_BITS,
-        .tx_buffer = tx,
-        .rx_buffer = rx,
-    };
-    spi_device_transmit(dev, &t);
-
-    return ((uint32_t)rx[0] << 16) | ((uint32_t)rx[1] << 8) | rx[2];
-}
-
-static void ads131m08_write_reg(spi_device_handle_t dev, uint8_t addr, uint16_t val)
-{
-    // WREG: 011a aaaa annn nnnn, shift <<8 for 24-bit word (datasheet)
-    uint16_t cmd = 0x6000 | ((addr & 0x3F) << 7);
-    ads131m08_spi_xfer(dev, ((uint32_t)cmd) << 8);
-    ads131m08_spi_xfer(dev, ((uint32_t)val) << 8);
-}
-
-static void ads131m08_clear_fifo(spi_device_handle_t dev)
-{
-    // Datasheet: read two dummy frames to clear 2-deep FIFO
-    uint8_t tx[3 * ADS131M08_FRAME_WORDS] = {0};
-    uint8_t rx[3 * ADS131M08_FRAME_WORDS] = {0};
     spi_transaction_t t = {
         .length = ADS131M08_WORD_BITS * ADS131M08_FRAME_WORDS,
         .tx_buffer = tx,
         .rx_buffer = rx,
     };
+    gpio_set_level(cs, 0);
+    esp_rom_delay_us(2);          // tCSS
     spi_device_transmit(dev, &t);
-    spi_device_transmit(dev, &t);
+    esp_rom_delay_us(2);          // tCSH
+    gpio_set_level(cs, 1);
+}
+
+// WREG: command + data in one continuous 30-byte frame
+static void ads131m08_write_reg(spi_device_handle_t dev, gpio_num_t cs, uint8_t addr, uint16_t val)
+{
+    uint8_t tx[ADS131M08_FRAME_BYTES] = {0};
+    uint8_t rx[ADS131M08_FRAME_BYTES] = {0};
+
+    // Word 0: WREG command 011a aaaa a000 0000 (n=0 → write 1 register)
+    uint16_t cmd = 0x6000 | ((addr & 0x3F) << 7);
+    tx[0] = (cmd >> 8) & 0xFF;
+    tx[1] = cmd & 0xFF;
+    tx[2] = 0x00;
+
+    // Word 1: register data, MSB-aligned (16-bit value in upper 16 bits of 24-bit word)
+    tx[3] = (val >> 8) & 0xFF;
+    tx[4] = val & 0xFF;
+    tx[5] = 0x00;
+
+    ads131m08_transfer_frame(dev, cs, tx, rx);
+    esp_rom_delay_us(50);
+}
+
+// RREG: send command frame, then NULL frame to clock out the response
+static uint16_t ads131m08_read_reg(spi_device_handle_t dev, gpio_num_t cs, uint8_t addr)
+{
+    uint8_t tx[ADS131M08_FRAME_BYTES] = {0};
+    uint8_t rx[ADS131M08_FRAME_BYTES] = {0};
+
+    // First frame: RREG command
+    uint16_t cmd = 0xA000 | ((addr & 0x3F) << 7);
+    tx[0] = (cmd >> 8) & 0xFF;
+    tx[1] = cmd & 0xFF;
+    tx[2] = 0x00;
+    ads131m08_transfer_frame(dev, cs, tx, rx);
+    esp_rom_delay_us(50);
+
+    // Second frame: NULL (all zeros) → response appears in word 0
+    memset(tx, 0, sizeof(tx));
+    ads131m08_transfer_frame(dev, cs, tx, rx);
+
+    return ((uint16_t)rx[0] << 8) | rx[1];
+}
+
+// UNLOCK command (required before register writes on some revisions)
+static void ads131m08_unlock(spi_device_handle_t dev, gpio_num_t cs)
+{
+    uint8_t tx[ADS131M08_FRAME_BYTES] = {0};
+    uint8_t rx[ADS131M08_FRAME_BYTES] = {0};
+    // UNLOCK = 0x0655
+    tx[0] = 0x06;
+    tx[1] = 0x55;
+    tx[2] = 0x00;
+    ads131m08_transfer_frame(dev, cs, tx, rx);
+    esp_rom_delay_us(50);
+}
+
+static void ads131m08_clear_fifo(spi_device_handle_t dev, gpio_num_t cs)
+{
+    // Datasheet: two dummy (NULL) frames clear the 2-deep FIFO
+    uint8_t tx[ADS131M08_FRAME_BYTES] = {0};
+    uint8_t rx[ADS131M08_FRAME_BYTES] = {0};
+    ads131m08_transfer_frame(dev, cs, tx, rx);
+    ads131m08_transfer_frame(dev, cs, tx, rx);
 }
 
 static uint16_t ads131m08_osr_to_clock(uint16_t osr, bool channels_on)
@@ -312,35 +357,56 @@ static uint16_t ads131m08_osr_to_clock(uint16_t osr, bool channels_on)
     return val;
 }
 
+
+#define ADS131M08_NUM_CH    8
+
+// Per-channel offset (subtracted from every sample). Filled by ads131m08_calibrate().
+static int32_t adc1_offset[ADS131M08_NUM_CH] = {0};
+static int32_t adc2_offset[ADS131M08_NUM_CH] = {0};
+
+static void ads131m08_calibrate_reserved(uint16_t samples);
+static void ads131m08_calibrate_measure(uint16_t samples);
+
 static void init_ads131m08(void)
 {
     ads131m08_reset();
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // UNLOCK interface so register writes are accepted
+    ads131m08_unlock(adc1_spi, ADC1_SPI_CS);
+    ads131m08_unlock(adc2_spi, ADC2_SPI_CS);
+
+    // Verify communication with ID register (bits[15:12] should be 0x2)
+    uint16_t id1 = ads131m08_read_reg(adc1_spi, ADC1_SPI_CS, 0x00);
+    uint16_t id2 = ads131m08_read_reg(adc2_spi, ADC2_SPI_CS, 0x00);
+    ESP_LOGI(TAG, "ADS131M08 ID: ADC1=0x%04X  ADC2=0x%04X", id1, id2);
 
     uint16_t clk_off = ads131m08_osr_to_clock(PP_ADC_OSR, false);
     uint16_t clk_on  = ads131m08_osr_to_clock(PP_ADC_OSR, true);
 
     // 1. CLOCK: channels off + OSR
-    ads131m08_write_reg(adc1_spi, 0x03, clk_off);
-    ads131m08_write_reg(adc2_spi, 0x03, clk_off);
+    ads131m08_write_reg(adc1_spi, ADC1_SPI_CS, 0x03, clk_off);
+    ads131m08_write_reg(adc2_spi, ADC2_SPI_CS, 0x03, clk_off);
 
-    // 2. MODE: clear RESET, SPI timeout
-    ads131m08_write_reg(adc1_spi, 0x02, 0x0410);
-    ads131m08_write_reg(adc2_spi, 0x02, 0x0410);
+    // 2. MODE: clear RESET, 24-bit word, SPI timeout enabled
+    ads131m08_write_reg(adc1_spi, ADC1_SPI_CS, 0x02, 0x0110);
+    ads131m08_write_reg(adc2_spi, ADC2_SPI_CS, 0x02, 0x0110);
 
     // 3. CLOCK: all channels on + OSR
-    ads131m08_write_reg(adc1_spi, 0x03, clk_on);
-    ads131m08_write_reg(adc2_spi, 0x03, clk_on);
+    ads131m08_write_reg(adc1_spi, ADC1_SPI_CS, 0x03, clk_on);
+    ads131m08_write_reg(adc2_spi, ADC2_SPI_CS, 0x03, clk_on);
 
-    ESP_LOGI(TAG, "ADS131M08 init (OSR=%d)", PP_ADC_OSR);
+    ESP_LOGI(TAG, "ADS131M08 init done (OSR=%d)", PP_ADC_OSR);
 
-    // Clear FIFO
-    ads131m08_clear_fifo(adc1_spi);
-    ads131m08_clear_fifo(adc2_spi);
-    ESP_LOGI(TAG, "ADS131M08 FIFO cleared");
+    // Clear FIFO so first reads are fresh
+    ads131m08_clear_fifo(adc1_spi, ADC1_SPI_CS);
+    ads131m08_clear_fifo(adc2_spi, ADC2_SPI_CS);
+
+    // Boot: calibrate RESERVED channels only (hard-tied to GND)
+    ads131m08_calibrate_reserved(64);
 }
 
 // ========== ADS131M08 DRDY interrupt + 1s average ==========
-#define ADS131M08_NUM_CH    8
 static int32_t adc1_latest[ADS131M08_NUM_CH] = {0};
 static int64_t adc1_sum[ADS131M08_NUM_CH] = {0};
 static uint32_t adc1_sample_count = 0;
@@ -353,29 +419,100 @@ static int32_t adc2_avg[ADS131M08_NUM_CH] = {0};
 static SemaphoreHandle_t drdy_sem = NULL;
 
 // Full 10-word frame, CS held for entire transaction
-static void ads131m08_read_frame(spi_device_handle_t dev, int32_t *channels)
+static void ads131m08_read_frame(spi_device_handle_t dev, gpio_num_t cs, int32_t *channels)
 {
-    uint8_t tx[3 * ADS131M08_FRAME_WORDS] = {0};
-    uint8_t rx[3 * ADS131M08_FRAME_WORDS] = {0};
+    uint8_t tx[ADS131M08_FRAME_BYTES] = {0};   // NULL command
+    uint8_t rx[ADS131M08_FRAME_BYTES] = {0};
 
-    spi_transaction_t t = {
-        .length = ADS131M08_WORD_BITS * ADS131M08_FRAME_WORDS,
-        .tx_buffer = tx,
-        .rx_buffer = rx,
-    };
-    spi_device_transmit(dev, &t);
+    ads131m08_transfer_frame(dev, cs, tx, rx);
 
-    // word0=status, word1-8=channels, word9=CRC
+    const int32_t *offsets = (cs == ADC1_SPI_CS) ? adc1_offset : adc2_offset;
+
+    // word0 = status/response, word1-8 = channel data, word9 = CRC
     for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
         int offset = 3 + ch * 3;
         int32_t raw = ((int32_t)rx[offset] << 16) |
                       ((int32_t)rx[offset + 1] << 8) |
                       rx[offset + 2];
         if (raw & 0x800000) {
-            raw |= 0xFF000000;
+            raw |= 0xFF000000;   // sign-extend 24-bit two's complement
         }
-        channels[ch] = raw;
+        channels[ch] = raw - offsets[ch];
     }
+}
+
+// Pause flag so the sampling task does not touch SPI during manual calibration
+static volatile bool adc_paused = false;
+
+// Boot-time: only RESERVED channels (ADC2 CH4-7, hard-tied to GND)
+static void ads131m08_calibrate_reserved(uint16_t samples)
+{
+    if (samples == 0) return;
+
+    int64_t sum[4] = {0};
+    int32_t ch[ADS131M08_NUM_CH];
+
+    // Clear only RESERVED offsets so we measure raw
+    for (int c = 4; c < 8; c++) adc2_offset[c] = 0;
+
+    for (uint16_t i = 0; i < samples; i++) {
+        ads131m08_read_frame(adc2_spi, ADC2_SPI_CS, ch);
+        for (int c = 0; c < 4; c++) sum[c] += ch[4 + c];
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    for (int c = 0; c < 4; c++) {
+        adc2_offset[4 + c] = (int32_t)(sum[c] / samples);
+    }
+
+    ESP_LOGI(TAG, "RESERVED offset calibration done (%u samples)", samples);
+    ESP_LOGI(TAG, "  RESERVED offsets: %ld %ld %ld %ld",
+             adc2_offset[4], adc2_offset[5], adc2_offset[6], adc2_offset[7]);
+}
+
+// Manual: calibrate measurement channels (ADC1 all + ADC2 CH0-3)
+// Call when those inputs are at their zero condition.
+static void ads131m08_calibrate_measure(uint16_t samples)
+{
+    if (samples == 0) return;
+
+    int64_t sum1[ADS131M08_NUM_CH] = {0};
+    int64_t sum2[4] = {0};
+    int32_t ch[ADS131M08_NUM_CH];
+
+    // Pause background sampling to avoid SPI contention
+    adc_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    // Clear offsets of channels we are about to calibrate (keep RESERVED)
+    memset(adc1_offset, 0, sizeof(adc1_offset));
+    for (int c = 0; c < 4; c++) adc2_offset[c] = 0;
+
+    for (uint16_t i = 0; i < samples; i++) {
+        ads131m08_read_frame(adc1_spi, ADC1_SPI_CS, ch);
+        for (int c = 0; c < ADS131M08_NUM_CH; c++) sum1[c] += ch[c];
+
+        ads131m08_read_frame(adc2_spi, ADC2_SPI_CS, ch);
+        for (int c = 0; c < 4; c++) sum2[c] += ch[c];
+
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    for (int c = 0; c < ADS131M08_NUM_CH; c++) {
+        adc1_offset[c] = (int32_t)(sum1[c] / samples);
+    }
+    for (int c = 0; c < 4; c++) {
+        adc2_offset[c] = (int32_t)(sum2[c] / samples);
+    }
+
+    adc_paused = false;
+
+    ESP_LOGI(TAG, "Manual offset calibration done (%u samples)", samples);
+    ESP_LOGI(TAG, "  ADC1 offsets: %ld %ld %ld %ld %ld %ld %ld %ld",
+             adc1_offset[0], adc1_offset[1], adc1_offset[2], adc1_offset[3],
+             adc1_offset[4], adc1_offset[5], adc1_offset[6], adc1_offset[7]);
+    ESP_LOGI(TAG, "  ADC2 COMMON offsets: %ld %ld %ld %ld",
+             adc2_offset[0], adc2_offset[1], adc2_offset[2], adc2_offset[3]);
 }
 
 static void IRAM_ATTR drdy_isr_handler(void *arg)
@@ -395,6 +532,10 @@ static void task_ads131m08(void *arg)
     uint32_t last_log_tick = xTaskGetTickCount();
 
     while (1) {
+        if (adc_paused) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
 #if PP_ADC_USE_DRDY
         // Wait for DRDY interrupt
         if (xSemaphoreTake(drdy_sem, pdMS_TO_TICKS(100)) != pdTRUE) {
@@ -413,14 +554,14 @@ static void task_ads131m08(void *arg)
             last_web_sample = xTaskGetTickCount();
         }
 
-        ads131m08_read_frame(adc1_spi, channels);
+        ads131m08_read_frame(adc1_spi, ADC1_SPI_CS, channels);
         for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
             adc1_sum[ch] += channels[ch];
             adc1_latest[ch] = channels[ch];
         }
         adc1_sample_count++;
 
-        ads131m08_read_frame(adc2_spi, channels);
+        ads131m08_read_frame(adc2_spi, ADC2_SPI_CS, channels);
         for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
             adc2_sum[ch] += channels[ch];
             adc2_latest[ch] = channels[ch];
@@ -818,7 +959,7 @@ static void cmd_dummy_3(void)
 
 static void task_console(void *arg)
 {
-    ESP_LOGI(TAG, "Console ready. Commands: r=relay, a=ADC log, w=web update, 1/2/3=dummy");
+    ESP_LOGI(TAG, "Console ready. Commands: r=relay, a=ADC log, w=web update, c=calibrate measure, 1/2/3=dummy");
     while (1) {
         int c = getchar();
         if (c == EOF) {
@@ -840,6 +981,11 @@ static void task_console(void *arg)
             case 'R':
                 cmd_relay_toggle();
                 break;
+            case 'c':
+            case 'C':
+                ESP_LOGI(TAG, "Starting manual calibration (measure channels)...");
+                ads131m08_calibrate_measure(64);
+                break;
             case '1':
                 cmd_dummy_1();
                 break;
@@ -853,7 +999,7 @@ static void task_console(void *arg)
             case '\r':
                 break;
             default:
-                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, 1, 2, 3", c, c);
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, c, 1, 2, 3", c, c);
                 break;
         }
     }
