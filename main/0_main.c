@@ -149,7 +149,10 @@ static void ads131m08_reset(void)
     ESP_LOGI(TAG, "ADS131M08 reset pulse sent");
 }
 
-// Basic SPI transaction helper (24-bit word)
+// ADS131M08: 10-word frame (status + 8ch + CRC), 24-bit words
+#define ADS131M08_FRAME_WORDS   10
+#define ADS131M08_WORD_BITS     24
+
 static uint32_t ads131m08_spi_xfer(spi_device_handle_t dev, uint32_t tx_word)
 {
     uint8_t tx[3] = {
@@ -160,7 +163,7 @@ static uint32_t ads131m08_spi_xfer(spi_device_handle_t dev, uint32_t tx_word)
     uint8_t rx[3] = {0};
 
     spi_transaction_t t = {
-        .length = 24,
+        .length = ADS131M08_WORD_BITS,
         .tx_buffer = tx,
         .rx_buffer = rx,
     };
@@ -169,16 +172,51 @@ static uint32_t ads131m08_spi_xfer(spi_device_handle_t dev, uint32_t tx_word)
     return ((uint32_t)rx[0] << 16) | ((uint32_t)rx[1] << 8) | rx[2];
 }
 
+static void ads131m08_write_reg(spi_device_handle_t dev, uint8_t addr, uint16_t val)
+{
+    // WREG: 011a aaaa annn nnnn, shift <<8 for 24-bit word (datasheet)
+    uint16_t cmd = 0x6000 | ((addr & 0x3F) << 7);
+    ads131m08_spi_xfer(dev, ((uint32_t)cmd) << 8);
+    ads131m08_spi_xfer(dev, ((uint32_t)val) << 8);
+}
+
+static void ads131m08_clear_fifo(spi_device_handle_t dev)
+{
+    // Datasheet: read two dummy frames to clear 2-deep FIFO
+    uint8_t tx[3 * ADS131M08_FRAME_WORDS] = {0};
+    uint8_t rx[3 * ADS131M08_FRAME_WORDS] = {0};
+    spi_transaction_t t = {
+        .length = ADS131M08_WORD_BITS * ADS131M08_FRAME_WORDS,
+        .tx_buffer = tx,
+        .rx_buffer = rx,
+    };
+    spi_device_transmit(dev, &t);
+    spi_device_transmit(dev, &t);
+}
+
 static void init_ads131m08(void)
 {
     ads131m08_reset();
 
-    // Simple null command to clear
-    uint32_t id1 = ads131m08_spi_xfer(adc1_spi, 0x000000);
-    ESP_LOGI(TAG, "ADS131M08 ADC1 first response: 0x%06lx", id1);
+    // Datasheet sequence:
+    // 1. CLOCK (0x03): channels off + OSR_4096
+    ads131m08_write_reg(adc1_spi, 0x03, 0x0014);
+    ads131m08_write_reg(adc2_spi, 0x03, 0x0014);
 
-    uint32_t id2 = ads131m08_spi_xfer(adc2_spi, 0x000000);
-    ESP_LOGI(TAG, "ADS131M08 ADC2 first response: 0x%06lx", id2);
+    // 2. MODE (0x02): clear RESET (0x0400), SPI timeout (0x0010)
+    ads131m08_write_reg(adc1_spi, 0x02, 0x0410);
+    ads131m08_write_reg(adc2_spi, 0x02, 0x0410);
+
+    // 3. CLOCK: all channels on (0xFF00) + OSR_4096
+    ads131m08_write_reg(adc1_spi, 0x03, 0xFF14);
+    ads131m08_write_reg(adc2_spi, 0x03, 0xFF14);
+
+    ESP_LOGI(TAG, "ADS131M08 init (datasheet seq, OSR=4096)");
+
+    // Clear FIFO
+    ads131m08_clear_fifo(adc1_spi);
+    ads131m08_clear_fifo(adc2_spi);
+    ESP_LOGI(TAG, "ADS131M08 FIFO cleared");
 }
 
 // ========== ADS131M08 DRDY interrupt + 1s average ==========
@@ -194,27 +232,25 @@ static uint32_t adc2_sample_count = 0;
 static int32_t adc2_avg[ADS131M08_NUM_CH] = {0};
 static SemaphoreHandle_t drdy_sem = NULL;
 
-// Read one full frame from ADS131M08 (status + 8 channels)
-// Frame format: 24-bit status + 8 × 24-bit channel data
+// Full 10-word frame, CS held for entire transaction
 static void ads131m08_read_frame(spi_device_handle_t dev, int32_t *channels)
 {
-    uint8_t tx[3 * 9] = {0};  // NULL command + 8 dummy words
-    uint8_t rx[3 * 9] = {0};
+    uint8_t tx[3 * ADS131M08_FRAME_WORDS] = {0};
+    uint8_t rx[3 * ADS131M08_FRAME_WORDS] = {0};
 
     spi_transaction_t t = {
-        .length = 24 * 9,
+        .length = ADS131M08_WORD_BITS * ADS131M08_FRAME_WORDS,
         .tx_buffer = tx,
         .rx_buffer = rx,
     };
     spi_device_transmit(dev, &t);
 
-    // Skip status word (first 3 bytes), then 8 channels
+    // word0=status, word1-8=channels, word9=CRC
     for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
         int offset = 3 + ch * 3;
         int32_t raw = ((int32_t)rx[offset] << 16) |
                       ((int32_t)rx[offset + 1] << 8) |
                       rx[offset + 2];
-        // Sign extend 24-bit to 32-bit
         if (raw & 0x800000) {
             raw |= 0xFF000000;
         }
@@ -239,9 +275,17 @@ static void task_ads131m08(void *arg)
     uint32_t last_log_tick = xTaskGetTickCount();
 
     while (1) {
-        // Always sense, regardless of log/web settings
         if (xSemaphoreTake(drdy_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
-            // Read ADC1 (triggered by DRDY)
+            // When web is on, sample only once every 2s to avoid SPI collision
+            if (web_update_enabled) {
+                static uint32_t last_web_sample = 0;
+                if ((xTaskGetTickCount() - last_web_sample) < pdMS_TO_TICKS(2000)) {
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    continue;
+                }
+                last_web_sample = xTaskGetTickCount();
+            }
+
             ads131m08_read_frame(adc1_spi, channels);
             for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
                 adc1_sum[ch] += channels[ch];
@@ -249,7 +293,6 @@ static void task_ads131m08(void *arg)
             }
             adc1_sample_count++;
 
-            // Read ADC2 on the same DRDY
             ads131m08_read_frame(adc2_spi, channels);
             for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
                 adc2_sum[ch] += channels[ch];
@@ -311,6 +354,25 @@ static void init_ads131m08_drdy(void)
 // ========== W5500 Ethernet ==========
 static esp_eth_handle_t eth_handle = NULL;
 static esp_netif_t *eth_netif = NULL;
+static httpd_handle_t web_server = NULL;
+
+static void stop_webserver(void)
+{
+    if (web_server) {
+        httpd_stop(web_server);
+        web_server = NULL;
+        ESP_LOGI(TAG, "Web server stopped");
+    }
+}
+
+static void w5500_hard_reset(void)
+{
+    gpio_set_level(ETH_RST_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(ETH_RST_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    ESP_LOGI(TAG, "W5500 hard reset done");
+}
 
 static void eth_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
@@ -319,9 +381,18 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
         if (event_id == ETHERNET_EVENT_CONNECTED) {
             ESP_LOGI(TAG, "Ethernet Link Up");
             esp_netif_dhcpc_start(eth_netif);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            start_webserver();
         } else if (event_id == ETHERNET_EVENT_DISCONNECTED) {
             ESP_LOGI(TAG, "Ethernet Link Down");
             esp_netif_dhcpc_stop(eth_netif);
+            stop_webserver();
+            // Hard reset W5500 so next link-up recovers cleanly
+            w5500_hard_reset();
+        } else if (event_id == ETHERNET_EVENT_START) {
+            ESP_LOGI(TAG, "Ethernet Link Down");
+            esp_netif_dhcpc_stop(eth_netif);
+            stop_webserver();
         } else if (event_id == ETHERNET_EVENT_START) {
             ESP_LOGI(TAG, "Ethernet Started");
         } else if (event_id == ETHERNET_EVENT_STOP) {
@@ -350,15 +421,7 @@ static void init_spi_bus(void)
 
 static void init_w5500(void)
 {
-    // Reset pin
-    gpio_reset_pin(ETH_RST_PIN);
-    gpio_set_direction(ETH_RST_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(ETH_RST_PIN, 1);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    gpio_set_level(ETH_RST_PIN, 0);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    gpio_set_level(ETH_RST_PIN, 1);
-    vTaskDelay(pdMS_TO_TICKS(50));
+    w5500_hard_reset();
 
     spi_device_interface_config_t devcfg = {
         .command_bits = 16,
@@ -461,22 +524,27 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 
 static void start_webserver(void)
 {
+    if (web_server) {
+        ESP_LOGI(TAG, "Web server already running");
+        return;
+    }
+
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.stack_size = 8192;  // increase to avoid overflow
+    config.stack_size = 8192;
 
-    httpd_handle_t server = NULL;
-    if (httpd_start(&server, &config) == ESP_OK) {
+    if (httpd_start(&web_server, &config) == ESP_OK) {
         httpd_uri_t uri_get = {
             .uri = "/",
             .method = HTTP_GET,
             .handler = root_get_handler,
             .user_ctx = NULL
         };
-        httpd_register_uri_handler(server, &uri_get);
+        httpd_register_uri_handler(web_server, &uri_get);
         ESP_LOGI(TAG, "Web server started on port 80");
     } else {
         ESP_LOGE(TAG, "Failed to start web server");
+        web_server = NULL;
     }
 }
 
@@ -637,6 +705,14 @@ static void task_console(void *arg)
 }
 static void init_leds_gpio(void)
 {
+    gpio_reset_pin(ETH_SPI_CS);
+    gpio_reset_pin(ETH_RST_PIN);
+    gpio_reset_pin(ETH_INT_PIN);
+    gpio_set_direction(ETH_SPI_CS, GPIO_MODE_OUTPUT);
+    gpio_set_direction(ETH_RST_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(ETH_SPI_CS, 1);
+    gpio_set_level(ETH_RST_PIN, 1);
+
     gpio_reset_pin(ADC_SYNC_PIN);
     gpio_reset_pin(ADC_DRDY_PIN);
 

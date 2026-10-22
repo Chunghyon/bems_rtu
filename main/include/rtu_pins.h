@@ -16,6 +16,8 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 
+#define PP_ENABLE_ETHERNET		0
+
 // Common SPI pins observed in schematic context
 #define ETH_SPI_HOST			SPI2_HOST
 #define ETH_SPI_MOSI            GPIO_NUM_11
