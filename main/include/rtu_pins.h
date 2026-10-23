@@ -16,7 +16,8 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 
-#define PP_ENABLE_ETHERNET		0
+#define PP_ENABLE_ETHERNET		1
+#define PP_ENABLE_ADC			1
 
 // ADC conversion mode: 1 = use DRDY interrupt, 0 = on-demand (timed read)
 #define PP_ADC_USE_DRDY			0
@@ -34,7 +35,7 @@
 // Ethernet SPI host selection
 // 0 = share SPI2_HOST with ADC (original pins GPIO11/13/12)
 // 1 = use dedicated SPI3_HOST (MOSI=GPIO35, MISO=GPIO36, CLK=GPIO37)
-#define PP_ETH_USE_SPI3			0
+#define PP_ETH_USE_SPI3			1
 
 // ========== ADC SPI (always SPI2_HOST) ==========
 #define ADC_SPI_HOST			SPI2_HOST
@@ -45,9 +46,9 @@
 // ========== Ethernet SPI ==========
 #if PP_ETH_USE_SPI3
 #define ETH_SPI_HOST			SPI3_HOST
-#define ETH_SPI_MOSI			GPIO_NUM_35
-#define ETH_SPI_MISO			GPIO_NUM_36
-#define ETH_SPI_CLK				GPIO_NUM_37
+#define ETH_SPI_MOSI			GPIO_NUM_2
+#define ETH_SPI_MISO			GPIO_NUM_48
+#define ETH_SPI_CLK				GPIO_NUM_1
 #else
 #define ETH_SPI_HOST			SPI2_HOST
 #define ETH_SPI_MOSI			GPIO_NUM_11

@@ -36,6 +36,7 @@
 #include "esp_http_server.h"
 
 #include "rtu_pins.h"
+#include "eth_w5500.h"
 
 // ========== ADC Channel & PCA9555 Port Enums ==========
 // ADC1 channels (ADS131M08 #1) — names linked to schematic nets / function
@@ -167,7 +168,6 @@ static void init_pulse_inputs(void)
                            (1ULL << PULSE_INPUT_3) | (1ULL << PULSE_INPUT_4);
     gpio_config(&io_conf);
 
-    gpio_install_isr_service(0);
     gpio_isr_handler_add(PULSE_INPUT_1, pulse_isr_handler, (void*)0);
     gpio_isr_handler_add(PULSE_INPUT_2, pulse_isr_handler, (void*)1);
     gpio_isr_handler_add(PULSE_INPUT_3, pulse_isr_handler, (void*)2);
@@ -202,45 +202,6 @@ static void init_rs485(uart_port_t uart_num, int tx, int rx, int de_re)
 // Only ADC1 DRDY (ADC_DRDY_PIN) is used.
 static spi_device_handle_t adc1_spi = NULL;
 static spi_device_handle_t adc2_spi = NULL;
-
-// ADS131M08 SPI: Mode 1 (CPOL=0, CPHA=1), 24-bit frames
-static void init_ads131m08_spi(void)
-{
-    // ADC always on SPI2_HOST (bus already initialized)
-
-    spi_device_interface_config_t adc_devcfg = {
-        .command_bits = 0,
-        .address_bits = 0,
-        .dummy_bits = 0,
-        .mode = 1,                          // ADS131M08 uses SPI mode 1
-        .clock_speed_hz = ADC_SPI_CLK_SPEED_HZ,  // 8 MHz
-        .spics_io_num = -1,                 // Manual CS (driver CS timing is unreliable in mode 1)
-        .queue_size = 4,
-    };
-
-    // ADC1
-    ESP_ERROR_CHECK(spi_bus_add_device(ADC_SPI_HOST, &adc_devcfg, &adc1_spi));
-
-    // ADC2 (CS only; DRDY net was cut)
-    ESP_ERROR_CHECK(spi_bus_add_device(ADC_SPI_HOST, &adc_devcfg, &adc2_spi));
-
-    // Manual CS pins (active low, idle high)
-    gpio_set_direction(ADC1_SPI_CS, GPIO_MODE_OUTPUT);
-    gpio_set_level(ADC1_SPI_CS, 1);
-    gpio_set_direction(ADC2_SPI_CS, GPIO_MODE_OUTPUT);
-    gpio_set_level(ADC2_SPI_CS, 1);
-
-    // SYNC / RESET pin
-    gpio_set_direction(ADC_SYNC_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(ADC_SYNC_PIN, 1);
-
-    // DRDY pin (ADC1 only)
-    gpio_set_direction(ADC_DRDY_PIN, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(ADC_DRDY_PIN, GPIO_PULLUP_ONLY);
-
-    ESP_LOGI(TAG, "ADS131M08 SPI devices added (ADC1 CS=%d, ADC2 CS=%d, DRDY=%d, SYNC=%d)",
-             ADC1_SPI_CS, ADC2_SPI_CS, ADC_DRDY_PIN, ADC_SYNC_PIN);
-}
 
 static void ads131m08_reset(void)
 {
@@ -372,6 +333,39 @@ static void init_ads131m08(void)
     ads131m08_reset();
     vTaskDelay(pdMS_TO_TICKS(50));
 
+    spi_device_interface_config_t adc_devcfg = {
+        .command_bits = 0,
+        .address_bits = 0,
+        .dummy_bits = 0,
+        .mode = 1,                          // ADS131M08 uses SPI mode 1
+        .clock_speed_hz = ADC_SPI_CLK_SPEED_HZ,  // 8 MHz
+        .spics_io_num = -1,                 // Manual CS (driver CS timing is unreliable in mode 1)
+        .queue_size = 4,
+    };
+
+    // ADC1
+    ESP_ERROR_CHECK(spi_bus_add_device(ADC_SPI_HOST, &adc_devcfg, &adc1_spi));
+
+    // ADC2 (CS only; DRDY net was cut)
+    ESP_ERROR_CHECK(spi_bus_add_device(ADC_SPI_HOST, &adc_devcfg, &adc2_spi));
+
+    // Manual CS pins (active low, idle high)
+    gpio_set_direction(ADC1_SPI_CS, GPIO_MODE_OUTPUT);
+    gpio_set_level(ADC1_SPI_CS, 1);
+    gpio_set_direction(ADC2_SPI_CS, GPIO_MODE_OUTPUT);
+    gpio_set_level(ADC2_SPI_CS, 1);
+
+    // SYNC / RESET pin
+    gpio_set_direction(ADC_SYNC_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(ADC_SYNC_PIN, 1);
+
+    // DRDY pin (ADC1 only)
+    gpio_set_direction(ADC_DRDY_PIN, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(ADC_DRDY_PIN, GPIO_PULLUP_ONLY);
+
+    ESP_LOGI(TAG, "ADS131M08 SPI devices added (ADC1 CS=%d, ADC2 CS=%d, DRDY=%d, SYNC=%d)",
+             ADC1_SPI_CS, ADC2_SPI_CS, ADC_DRDY_PIN, ADC_SYNC_PIN);
+
     // UNLOCK interface so register writes are accepted
     ads131m08_unlock(adc1_spi, ADC1_SPI_CS);
     ads131m08_unlock(adc2_spi, ADC2_SPI_CS);
@@ -404,6 +398,15 @@ static void init_ads131m08(void)
 
     // Boot: calibrate RESERVED channels only (hard-tied to GND)
     ads131m08_calibrate_reserved(64);
+
+#if PP_ADC_USE_DRDY
+    drdy_sem = xSemaphoreCreateBinary();
+    gpio_set_intr_type(ADC_DRDY_PIN, GPIO_INTR_NEGEDGE);
+    gpio_isr_handler_add(ADC_DRDY_PIN, drdy_isr_handler, NULL);
+    ESP_LOGI(TAG, "ADS131M08 DRDY interrupt mode");
+#else
+    ESP_LOGI(TAG, "ADS131M08 on-demand mode (no DRDY)");
+#endif
 }
 
 // ========== ADS131M08 DRDY interrupt + 1s average ==========
@@ -545,14 +548,6 @@ static void task_ads131m08(void *arg)
         // On-demand: read at fixed interval (no DRDY)
         vTaskDelay(pdMS_TO_TICKS(PP_ADC_SAMPLE_MS));
 #endif
-        // When web is on, sample only once every 2s
-        if (web_update_enabled) {
-            static uint32_t last_web_sample = 0;
-            if ((xTaskGetTickCount() - last_web_sample) < pdMS_TO_TICKS(2000)) {
-                continue;
-            }
-            last_web_sample = xTaskGetTickCount();
-        }
 
         ads131m08_read_frame(adc1_spi, ADC1_SPI_CS, channels);
         for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
@@ -580,9 +575,13 @@ static void task_ads131m08(void *arg)
                     adc1_sum[ch] = 0;
                 }
                 if (adc_log_enabled) {
-                    ESP_LOGI(TAG, "ADC1 1s avg (%lu samples):", adc1_sample_count);
+                    //ESP_LOGI(TAG, "ADC1 1s avg (%lu samples):", adc1_sample_count);
+                    ESP_LOGI(TAG, "  ==============================================");
                     for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
                         ESP_LOGI(TAG, "  ADC1 %s: %ld", adc1_ch_names[ch], adc1_avg[ch]);
+                        if(ch == 2 || ch == 5) {
+                            ESP_LOGI(TAG, "  ==============================================");
+                        }
                     }
                 }
                 adc1_sample_count = 0;
@@ -594,9 +593,15 @@ static void task_ads131m08(void *arg)
                     adc2_sum[ch] = 0;
                 }
                 if (adc_log_enabled) {
-                    ESP_LOGI(TAG, "ADC2 1s avg (%lu samples):", adc2_sample_count);
+                    //ESP_LOGI(TAG, "ADC2 1s avg (%lu samples):", adc2_sample_count);
                     for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
                         ESP_LOGI(TAG, "  ADC2 %s: %ld", adc2_ch_names[ch], adc2_avg[ch]);
+                        if(ch == 3) {
+                            ESP_LOGI(TAG, "  ==============================================");
+                        }
+                        else if(ch == 7) {
+                            ESP_LOGI(TAG, "\n");
+                        }
                     }
                 }
                 adc2_sample_count = 0;
@@ -607,22 +612,7 @@ static void task_ads131m08(void *arg)
     }
 }
 
-static void init_ads131m08_drdy(void)
-{
-#if PP_ADC_USE_DRDY
-    drdy_sem = xSemaphoreCreateBinary();
-    gpio_set_intr_type(ADC_DRDY_PIN, GPIO_INTR_NEGEDGE);
-    gpio_isr_handler_add(ADC_DRDY_PIN, drdy_isr_handler, NULL);
-    ESP_LOGI(TAG, "ADS131M08 DRDY interrupt mode");
-#else
-    ESP_LOGI(TAG, "ADS131M08 on-demand mode (no DRDY)");
-#endif
-    xTaskCreate(task_ads131m08, "ads131m08", 4096, NULL, 6, NULL);
-}
-
 // ========== W5500 Ethernet ==========
-static esp_eth_handle_t eth_handle = NULL;
-static esp_netif_t *eth_netif = NULL;
 static httpd_handle_t web_server = NULL;
 
 static void stop_webserver(void)
@@ -634,49 +624,53 @@ static void stop_webserver(void)
     }
 }
 
-static void w5500_hard_reset(void)
-{
-    gpio_set_level(ETH_RST_PIN, 0);
-    vTaskDelay(pdMS_TO_TICKS(10));
-    gpio_set_level(ETH_RST_PIN, 1);
-    vTaskDelay(pdMS_TO_TICKS(50));
-    ESP_LOGI(TAG, "W5500 hard reset done");
-}
-
+/** Event handler for Ethernet events */
 static void eth_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
+    int32_t event_id, void *event_data)
 {
-    if (event_base == ETH_EVENT) {
-        if (event_id == ETHERNET_EVENT_CONNECTED) {
-            ESP_LOGI(TAG, "Ethernet Link Up");
-            esp_netif_dhcpc_start(eth_netif);
-            vTaskDelay(pdMS_TO_TICKS(500));
-            start_webserver();
-        } else if (event_id == ETHERNET_EVENT_DISCONNECTED) {
-            ESP_LOGI(TAG, "Ethernet Link Down");
-            esp_netif_dhcpc_stop(eth_netif);
-            stop_webserver();
-            // Hard reset W5500 so next link-up recovers cleanly
-            w5500_hard_reset();
-        } else if (event_id == ETHERNET_EVENT_START) {
-            ESP_LOGI(TAG, "Ethernet Link Down");
-            esp_netif_dhcpc_stop(eth_netif);
-            stop_webserver();
-        } else if (event_id == ETHERNET_EVENT_START) {
-            ESP_LOGI(TAG, "Ethernet Started");
-        } else if (event_id == ETHERNET_EVENT_STOP) {
-            ESP_LOGI(TAG, "Ethernet Stopped");
-        }
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        ESP_LOGI(TAG, "Netmask: " IPSTR, IP2STR(&event->ip_info.netmask));
-        ESP_LOGI(TAG, "Gateway: " IPSTR, IP2STR(&event->ip_info.gw));
-        start_webserver();
+    uint8_t mac_addr[6] = {0};
+    /* we can get the ethernet driver handle from event data */
+    esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
+
+    switch (event_id) {
+    case ETHERNET_EVENT_CONNECTED:
+        esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, mac_addr);
+        ESP_LOGI(TAG, "Ethernet Link Up");
+        ESP_LOGI(TAG, "Ethernet HW Addr %02x:%02x:%02x:%02x:%02x:%02x",
+        mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+        break;
+    case ETHERNET_EVENT_DISCONNECTED:
+        ESP_LOGI(TAG, "Ethernet Link Down");
+        break;
+    case ETHERNET_EVENT_START:
+        ESP_LOGI(TAG, "Ethernet Started");
+        break;
+    case ETHERNET_EVENT_STOP:
+        ESP_LOGI(TAG, "Ethernet Stopped");
+        break;
+    default:
+        break;
     }
 }
 
-static void init_spi_buses(void)
+/** Event handler for IP_EVENT_ETH_GOT_IP */
+static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
+       int32_t event_id, void *event_data)
+{
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
+    const esp_netif_ip_info_t *ip_info = &event->ip_info;
+
+    ESP_LOGI(TAG, "Ethernet Got IP Address");
+    ESP_LOGI(TAG, "~~~~~~~~~~~");
+    ESP_LOGI(TAG, "ETHIP:" IPSTR, IP2STR(&ip_info->ip));
+    ESP_LOGI(TAG, "ETHMASK:" IPSTR, IP2STR(&ip_info->netmask));
+    ESP_LOGI(TAG, "ETHGW:" IPSTR, IP2STR(&ip_info->gw));
+    ESP_LOGI(TAG, "~~~~~~~~~~~");
+
+    start_webserver();
+}
+
+static void init_spi2_host(void)
 {
     // Always initialize SPI2 for ADC (fixed pins)
     spi_bus_config_t adc_buscfg = {
@@ -686,76 +680,9 @@ static void init_spi_buses(void)
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
     };
-    ESP_ERROR_CHECK(spi_bus_initialize(ADC_SPI_HOST, &adc_buscfg, SPI_DMA_CH_AUTO));
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &adc_buscfg, SPI_DMA_CH_AUTO));
     ESP_LOGI(TAG, "ADC SPI bus ready (SPI2_HOST, MOSI=%d MISO=%d CLK=%d)",
              ADC_SPI_MOSI, ADC_SPI_MISO, ADC_SPI_CLK);
-
-#if PP_ETH_USE_SPI3
-    // Dedicated SPI3 bus for W5500
-    spi_bus_config_t eth_buscfg = {
-        .miso_io_num = ETH_SPI_MISO,
-        .mosi_io_num = ETH_SPI_MOSI,
-        .sclk_io_num = ETH_SPI_CLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-    };
-    ESP_ERROR_CHECK(spi_bus_initialize(ETH_SPI_HOST, &eth_buscfg, SPI_DMA_CH_AUTO));
-    ESP_LOGI(TAG, "ETH SPI bus ready (SPI3_HOST, MOSI=%d MISO=%d CLK=%d)",
-             ETH_SPI_MOSI, ETH_SPI_MISO, ETH_SPI_CLK);
-#else
-    ESP_LOGI(TAG, "ETH shares SPI2_HOST with ADC (MOSI=%d MISO=%d CLK=%d)",
-             ETH_SPI_MOSI, ETH_SPI_MISO, ETH_SPI_CLK);
-#endif
-}
-
-static void init_w5500(void)
-{
-    w5500_hard_reset();
-
-    spi_device_interface_config_t devcfg = {
-        .command_bits = 16,
-        .address_bits = 8,
-        .mode = 0,
-        .clock_speed_hz = ETH_SPI_CLK_SPEED_HZ,
-        .spics_io_num = ETH_SPI_CS,
-        .queue_size = 20,
-    };
-
-    eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(ETH_SPI_HOST, &devcfg);
-    w5500_config.int_gpio_num = ETH_INT_PIN;
-
-    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
-    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
-    phy_config.phy_addr = 1;
-    phy_config.reset_gpio_num = ETH_RST_PIN;
-
-    esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_config, &mac_config);
-    esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_config);
-
-    esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
-    ESP_ERROR_CHECK(esp_eth_driver_install(&eth_config, &eth_handle));
-
-    // W5500 has no factory MAC — set one explicitly
-    uint8_t mac_addr[6] = {0x02, 0x00, 0x00, 0x12, 0x34, 0x56};
-    ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle, ETH_CMD_S_MAC_ADDR, mac_addr));
-    ESP_LOGI(TAG, "MAC set to %02X:%02X:%02X:%02X:%02X:%02X",
-             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-
-    esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
-    eth_netif = esp_netif_new(&cfg);
-    ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
-
-    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &eth_event_handler, NULL));
-
-    ESP_ERROR_CHECK(esp_eth_start(eth_handle));
-    ESP_LOGI(TAG, "W5500 Ethernet initialized on %s (waiting for link + DHCP)",
-#if PP_ETH_USE_SPI3
-             "SPI3_HOST"
-#else
-             "SPI2_HOST (shared)"
-#endif
-             );
 }
 
 // ========== Simple Web Server ==========
@@ -844,7 +771,7 @@ static void start_webserver(void)
 }
 
 // ========== Periodic task ==========
-static void task_data_collection(void *arg)
+static void task_pulse_data_collection(void *arg)
 {
     while (1) {
         if (adc_log_enabled) {
@@ -1033,6 +960,21 @@ static void init_leds_gpio(void)
     gpio_set_level(LED_STATUS_RED, 0);
 }
 
+esp_err_t cc_tcpip_stack_init(esp_eth_handle_t eth_handle)
+{
+    // Initialize TCP/IP network interface (should be called only once in application)
+    ESP_ERROR_CHECK(esp_netif_init());
+    // Create default event loop that running in background
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
+    esp_netif_t *eth_netif = esp_netif_new(&cfg);
+    esp_eth_netif_glue_handle_t eth_netif_glue = esp_eth_new_netif_glue(eth_handle);
+    ESP_ERROR_CHECK(esp_netif_attach(eth_netif, eth_netif_glue));
+
+    return ESP_OK;
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "BEMS RTU starting...");
@@ -1044,33 +986,43 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    // Install the GPIO driver's ETS_GPIO_INTR_SOURCE ISR handler service, 
+    //  which allows per-pin GPIO interrupt handlers.
+    gpio_install_isr_service(0);
 
     init_leds_gpio();
-    init_i2c_pca9555();
-    xTaskCreate(task_relay_test, "relay_test", 4096, NULL, 4, NULL);
-    xTaskCreate(task_console, "console", 4096, NULL, 3, NULL);
-    init_pulse_inputs();
-    init_rs485(RS485_UART_NUM_1, RS485_TX_PIN_1, RS485_RX_PIN_1, RS485_DE_RE_PIN_1);
-    init_rs485(RS485_UART_NUM_2, RS485_TX_PIN_2, RS485_RX_PIN_2, RS485_DE_RE_PIN_2);
 
-    init_spi_buses();
+    //init_i2c_pca9555();
+    //xTaskCreate(task_relay_test, "relay_test", 4096, NULL, 4, NULL);
+ 
+    //init_pulse_inputs();
+    //init_rs485(RS485_UART_NUM_1, RS485_TX_PIN_1, RS485_RX_PIN_1, RS485_DE_RE_PIN_1);
+    //init_rs485(RS485_UART_NUM_2, RS485_TX_PIN_2, RS485_RX_PIN_2, RS485_DE_RE_PIN_2);
+    //xTaskCreate(task_pulse_data_collection, "pulse_collect", 4096, NULL, 5, NULL);
+
+    init_spi2_host();
 
 #if PP_ENABLE_ETHERNET
-    init_w5500();
+    esp_eth_handle_t eth_handle;
+
+    ESP_ERROR_CHECK(w5500_init(&eth_handle));
+    ESP_ERROR_CHECK(cc_tcpip_stack_init(eth_handle));
+
+    // Register user defined event handers
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &got_ip_event_handler, NULL));
+
+    ESP_ERROR_CHECK(esp_eth_start(eth_handle));
 #else
     ESP_LOGI(TAG, "Ethernet disabled (PP_ENABLE_ETHERNET=0)");
 #endif
-    init_ads131m08_spi();
-    init_ads131m08();
-    init_ads131m08_drdy();
- 
-    xTaskCreate(task_data_collection, "data_collect", 4096, NULL, 5, NULL);
 
-#if PP_ENABLE_ETHERNET
-    ESP_LOGI(TAG, "RTU ready. Web server will start after Ethernet gets IP.");
-#else
-    ESP_LOGI(TAG, "RTU ready (Ethernet disabled).");
-#endif
+#if PP_ENABLE_ADC
+    init_ads131m08();
+    xTaskCreate(task_ads131m08, "ads131m08", 4096, NULL, 6, NULL);
+ #endif
+ 
+    xTaskCreate(task_console, "console", 4096, NULL, 3, NULL);
+
+    ESP_LOGI(TAG, "RTU ready......");
 }
