@@ -16,6 +16,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -529,6 +530,7 @@ static void IRAM_ATTR drdy_isr_handler(void *arg)
 
 bool adc_log_enabled = false;
 bool web_update_enabled = false;
+int web_update_period_sec = 5;   // seconds (1~300)
 static void task_ads131m08(void *arg)
 {
     int32_t channels[ADS131M08_NUM_CH];
@@ -695,9 +697,13 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    const char *refresh = web_update_enabled
-        ? "<meta http-equiv='refresh' content='5'>"
-        : "";
+    char refresh_tag[64] = "";
+    char update_status[40] = "OFF";
+    if (web_update_enabled && web_update_period_sec >= 1) {
+        snprintf(refresh_tag, sizeof(refresh_tag),
+                 "<meta http-equiv='refresh' content='%d'>", web_update_period_sec);
+        snprintf(update_status, sizeof(update_status), "ON (%ds)", web_update_period_sec);
+    }
 
     int len = snprintf(buf, 2048,
         "<!DOCTYPE html><html><head><meta charset='utf-8'>%s"
@@ -719,8 +725,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<tr><td>1</td><td>%lu</td></tr><tr><td>2</td><td>%lu</td></tr>"
         "<tr><td>3</td><td>%lu</td></tr><tr><td>4</td><td>%lu</td></tr></table></div>"
         "<div class='box'><h2>ADC1 (1s avg)</h2><table><tr><th>CH</th><th>Value</th></tr>",
-        refresh,
-        web_update_enabled ? "ON (5s)" : "OFF",
+        refresh_tag,
+        update_status,
         pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3]);
 
     for (int ch = 0; ch < ADS131M08_NUM_CH && len < 2048 - 80; ch++) {
@@ -886,7 +892,7 @@ static void cmd_dummy_3(void)
 
 static void task_console(void *arg)
 {
-    ESP_LOGI(TAG, "Console ready. Commands: r=relay, a=ADC log, w=web update, c=calibrate measure, 1/2/3=dummy");
+    ESP_LOGI(TAG, "Console ready. Commands: r=relay, a=ADC log, w=web update, p=set period, c=calibrate measure, 1/2/3=dummy");
     while (1) {
         int c = getchar();
         if (c == EOF) {
@@ -902,8 +908,40 @@ static void task_console(void *arg)
             case 'w':
             case 'W':
                 web_update_enabled = !web_update_enabled;
-                ESP_LOGI(TAG, "Web update %s", web_update_enabled ? "ENABLED" : "DISABLED");
+                ESP_LOGI(TAG, "Web update %s (%ds)", web_update_enabled ? "ENABLED" : "DISABLED", web_update_period_sec);
                 break;
+            case 'p':
+            case 'P': {
+                ESP_LOGI(TAG, "Enter web update period in seconds (1~300), then Enter:");
+                char numbuf[8] = {0};
+                int idx = 0;
+                while (idx < (int)sizeof(numbuf) - 1) {
+                    int ch = getchar();
+                    if (ch == EOF) {
+                        vTaskDelay(pdMS_TO_TICKS(20));
+                        continue;
+                    }
+                    if (ch == '\n' || ch == '\r') {
+                        break;
+                    }
+                    if (ch >= '0' && ch <= '9') {
+                        numbuf[idx++] = (char)ch;
+                    }
+                }
+                numbuf[idx] = '\0';
+                if (idx > 0) {
+                    int val = atoi(numbuf);
+                    if (val >= 1 && val <= 300) {
+                        web_update_period_sec = val;
+                        ESP_LOGI(TAG, "Web update period set to %d seconds", web_update_period_sec);
+                    } else {
+                        ESP_LOGI(TAG, "Invalid value '%s' (must be 1~300). Period unchanged (%ds)", numbuf, web_update_period_sec);
+                    }
+                } else {
+                    ESP_LOGI(TAG, "No number entered. Period unchanged (%ds)", web_update_period_sec);
+                }
+                break;
+            }
             case 'r':
             case 'R':
                 cmd_relay_toggle();
@@ -926,7 +964,7 @@ static void task_console(void *arg)
             case '\r':
                 break;
             default:
-                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, c, 1, 2, 3", c, c);
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, p, c, 1, 2, 3", c, c);
                 break;
         }
     }
