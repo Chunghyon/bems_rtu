@@ -25,6 +25,15 @@ extern "C" {
 esp_err_t w5500_init(esp_eth_handle_t *eth_handle_out);
 
 /**
+ * @brief Read a W5500 common register via SPI (for debug).
+ *        Safe to call from console when investigating link issues.
+ * @param addr  Register offset (e.g. 0x0039 = VERSIONR, 0x002E = PHYCFGR)
+ * @param val   Output byte
+ * @return ESP_OK on success
+ */
+esp_err_t w5500_read_reg(uint16_t addr, uint8_t *val);
+
+/**
  * @brief De-initialize array of Ethernet drivers
  * @note All Ethernet drivers in the array must be stopped prior calling this function.
  *

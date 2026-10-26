@@ -922,7 +922,7 @@ static void cmd_dummy_3(void)
 
 static void task_console(void *arg)
 {
-    ESP_LOGI(TAG, "Console ready. Commands: r=relay, a=ADC log, w=web update, p=set period, c=calibrate measure, 1/2/3=dummy");
+    ESP_LOGI(TAG, "Console ready. Commands: r=relay, a=ADC log, w=web update, p=set period, v=VERSIONR, f=PHYCFGR, c=calibrate measure, 1/2/3=dummy");
     while (1) {
         int c = getchar();
         if (c == EOF) {
@@ -995,10 +995,31 @@ static void task_console(void *arg)
                 }
                 break;
             }
-            case 'r':
-            case 'R':
-                cmd_relay_toggle();
+            case 'v':
+            case 'V': {
+                uint8_t ver = 0;
+                if (w5500_read_reg(0x0039, &ver) == ESP_OK) {
+                    ESP_LOGI(TAG, "VERSIONR = 0x%02X (expect 0x04 if SPI OK)", ver);
+                } else {
+                    ESP_LOGE(TAG, "VERSIONR read failed");
+                }
                 break;
+            }
+            case 'f':
+            case 'F': {
+                uint8_t phy = 0;
+                if (w5500_read_reg(0x002E, &phy) == ESP_OK) {
+                    ESP_LOGI(TAG, "PHYCFGR = 0x%02X  LNK=%d  SPD=%s  DPX=%s  RST=%d",
+                             phy,
+                             phy & 0x01,
+                             (phy & 0x02) ? "100M" : "10M",
+                             (phy & 0x04) ? "FULL" : "HALF",
+                             (phy & 0x80) ? 1 : 0);
+                } else {
+                    ESP_LOGE(TAG, "PHYCFGR read failed");
+                }
+                break;
+            }
             case 'c':
             case 'C':
                 ESP_LOGI(TAG, "Starting manual calibration (measure channels)...");
@@ -1017,7 +1038,7 @@ static void task_console(void *arg)
             case '\r':
                 break;
             default:
-                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, p, c, 1, 2, 3", c, c);
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, p, v, f, c, 1, 2, 3", c, c);
                 break;
         }
     }

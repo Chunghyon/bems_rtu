@@ -21,6 +21,44 @@ typedef struct {
 static const char *TAG = "w5500_init";
 
 static bool gpio_isr_svc_init_by_eth = false; // indicates that we initialized the GPIO ISR service
+static spi_device_handle_t debug_spi = NULL;
+
+// ---------- Debug SPI register access ----------
+static esp_err_t w5500_debug_spi_init(void)
+{
+    if (debug_spi) return ESP_OK;
+
+    spi_device_interface_config_t devcfg = {
+        .mode = 0,
+        .clock_speed_hz = ETH_SPI_CLK_SPEED_HZ,
+        .queue_size = 1,
+        .spics_io_num = ETH_SPI_CS,
+    };
+    return spi_bus_add_device(ETH_SPI_HOST, &devcfg, &debug_spi);
+}
+
+esp_err_t w5500_read_reg(uint16_t addr, uint8_t *val)
+{
+    if (!val) return ESP_ERR_INVALID_ARG;
+    if (!debug_spi) {
+        esp_err_t err = w5500_debug_spi_init();
+        if (err != ESP_OK) return err;
+    }
+
+    // W5500 SPI: 2-byte address + control byte (BSB=0, Read, Variable length) + data
+    uint8_t tx[4] = { (uint8_t)(addr >> 8), (uint8_t)(addr & 0xFF), 0x00, 0x00 };
+    uint8_t rx[4] = {0};
+    spi_transaction_t t = {
+        .length = 32,
+        .tx_buffer = tx,
+        .rx_buffer = rx,
+    };
+    esp_err_t err = spi_device_transmit(debug_spi, &t);
+    if (err == ESP_OK) {
+        *val = rx[3];
+    }
+    return err;
+}
 
 static void w5500_hard_reset(void)
 {
