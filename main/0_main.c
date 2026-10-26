@@ -974,9 +974,19 @@ static void eth_full_recover(void)
     ESP_LOGI(TAG, "Full recover done. Wait for Link Up / IP...");
 }
 
+static void task_heartbeat(void *arg)
+{
+    uint32_t sec = 0;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        sec += 10;
+        ESP_LOGI(TAG, "[HB] uptime %lu s", (unsigned long)sec);
+    }
+}
+
 static void task_console(void *arg)
 {
-    ESP_LOGI(TAG, "Console ready. Commands: r=relay, a=ADC log, w=web update, p=set period, v=VERSIONR, f=PHYCFGR, s=soft reset, h=hard reset, c=calibrate measure, 1/2/3=dummy");
+    ESP_LOGI(TAG, "Console ready. Commands: r, a, w, p, v=VERSIONR, f=PHYCFGR, i=INT pin, n=INT cause, s, h, c, 1/2/3");
     while (1) {
         int c = getchar();
         if (c == EOF) {
@@ -1052,18 +1062,25 @@ static void task_console(void *arg)
             case 'v':
             case 'V': {
                 uint8_t ver = 0;
-                if (w5500_read_reg(0x0039, &ver) == ESP_OK) {
+                bool started = false;
+                if (g_eth_handle &&
+                    w5500_read_reg_exclusive(g_eth_handle, 0x0039, &ver, &started) == ESP_OK) {
                     ESP_LOGI(TAG, "VERSIONR = 0x%02X (expect 0x04 if SPI OK)", ver);
                 } else {
                     ESP_LOGE(TAG, "VERSIONR read failed");
+                }
+                if (!started) {
+                    ESP_LOGW(TAG, "Restart failed, full recover...");
+                    eth_full_recover();
                 }
                 break;
             }
             case 'f':
             case 'F': {
                 uint8_t phy = 0;
-                if (w5500_read_reg(0x002E, &phy) == ESP_OK) {
-                    // PHYCFGR bit7 RST is active-low: 1 = normal, 0 = PHY held in reset
+                bool started = false;
+                if (g_eth_handle &&
+                    w5500_read_reg_exclusive(g_eth_handle, 0x002E, &phy, &started) == ESP_OK) {
                     ESP_LOGI(TAG, "PHYCFGR = 0x%02X  LNK=%d  SPD=%s  DPX=%s  RST=%s",
                              phy,
                              phy & 0x01,
@@ -1072,6 +1089,30 @@ static void task_console(void *arg)
                              (phy & 0x80) ? "normal" : "RESET");
                 } else {
                     ESP_LOGE(TAG, "PHYCFGR read failed");
+                }
+                if (!started) {
+                    ESP_LOGW(TAG, "Restart failed, full recover...");
+                    eth_full_recover();
+                }
+                break;
+            }
+            case 'i':
+            case 'I': {
+                // No SPI. Safe while link is up.
+                int level = gpio_get_level(ETH_INT_PIN);
+                ESP_LOGI(TAG, "INT pin (GPIO%d) = %d (%s)", ETH_INT_PIN, level,
+                         level ? "released/idle" : "asserted/LOW");
+                break;
+            }
+            case 'n':
+            case 'N': {
+                bool started = false;
+                if (!g_eth_handle || w5500_dump_int_cause(g_eth_handle, &started) != ESP_OK) {
+                    ESP_LOGE(TAG, "INT cause dump failed");
+                }
+                if (!started) {
+                    ESP_LOGW(TAG, "Restart failed, full recover...");
+                    eth_full_recover();
                 }
                 break;
             }
@@ -1113,7 +1154,7 @@ static void task_console(void *arg)
             case '\r':
                 break;
             default:
-                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, p, v, f, s, h, c, 1, 2, 3", c, c);
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, p, v, f, i, n, s, h, c, 1, 2, 3", c, c);
                 break;
         }
     }
@@ -1214,6 +1255,7 @@ void app_main(void)
  #endif
  
     xTaskCreate(task_console, "console", 4096, NULL, 3, NULL);
+    xTaskCreate(task_heartbeat, "heartbeat", 2048, NULL, 2, NULL);
 
     ESP_LOGI(TAG, "RTU ready......");
 }

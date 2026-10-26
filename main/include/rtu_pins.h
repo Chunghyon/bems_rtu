@@ -55,7 +55,7 @@
 #define ETH_SPI_MISO			GPIO_NUM_13
 #define ETH_SPI_CLK				GPIO_NUM_12
 #endif
-#define ETH_SPI_CLK_SPEED_HZ	8000000  // 16 MHz for W5500, can be adjusted
+#define ETH_SPI_CLK_SPEED_HZ	16000000  // 16 MHz for W5500, can be adjusted
 
 // ========== Ethernet (W5500) ==========
 #define ETH_SPI_CS              GPIO_NUM_21 // SCSn
