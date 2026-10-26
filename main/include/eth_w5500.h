@@ -34,6 +34,39 @@ esp_err_t w5500_init(esp_eth_handle_t *eth_handle_out);
 esp_err_t w5500_read_reg(uint16_t addr, uint8_t *val);
 
 /**
+ * @brief Write a W5500 common register via SPI (for debug).
+ */
+esp_err_t w5500_write_reg(uint16_t addr, uint8_t val);
+
+/**
+ * @brief Software-reset the W5500 (MR.RST=1) then re-start the Ethernet driver.
+ *        Stops the driver, issues soft reset, waits, then calls esp_eth_start()
+ *        so MAC/PHY/sockets are re-initialized.
+ * @param eth_handle  Active Ethernet handle (must not be NULL)
+ * @return ESP_OK on success
+ */
+esp_err_t w5500_soft_reset(esp_eth_handle_t eth_handle);
+
+/**
+ * @brief Full recovery: RST pin pulse + uninstall/reinstall Ethernet driver.
+ *        Use this when the driver internal state is inconsistent
+ *        (e.g. after a failed soft-reset start).
+ *        On success, *eth_handle_io is replaced with the new handle.
+ *        Caller must re-attach netif glue and call esp_eth_start().
+ * @param eth_handle_io  in/out Ethernet handle
+ * @return ESP_OK on success
+ */
+esp_err_t w5500_reinstall_driver(esp_eth_handle_t *eth_handle_io);
+
+/**
+ * @brief Hardware-reset the W5500 via RST pin then re-start the Ethernet driver.
+ *        More reliable recovery than soft reset when PHY state is corrupted.
+ * @param eth_handle  Active Ethernet handle (must not be NULL)
+ * @return ESP_OK on success
+ */
+esp_err_t w5500_hard_reset_and_start(esp_eth_handle_t eth_handle);
+
+/**
  * @brief De-initialize array of Ethernet drivers
  * @note All Ethernet drivers in the array must be stopped prior calling this function.
  *

@@ -142,6 +142,9 @@ static const char * const pca_port_names[PCA_PORT_COUNT] = {
 
 static const char *TAG = "RTU_MAIN";
 
+static esp_eth_handle_t g_eth_handle = NULL;
+static esp_netif_t *g_eth_netif = NULL;
+static esp_eth_netif_glue_handle_t g_eth_glue = NULL;
 static void start_webserver(void);
 // ========== Pulse counters ==========
 static volatile uint32_t pulse_counts[4] = {0};
@@ -930,9 +933,50 @@ static void cmd_dummy_3(void)
     ESP_LOGI(TAG, "[DUMMY3] Test command 3 executed");
 }
 
+static void eth_full_recover(void)
+{
+    if (!g_eth_handle) {
+        ESP_LOGE(TAG, "No Ethernet handle to recover");
+        return;
+    }
+
+    // Tear down netif glue first so the old driver can be uninstalled
+    if (g_eth_glue) {
+        esp_eth_del_netif_glue(g_eth_glue);
+        g_eth_glue = NULL;
+    }
+    if (g_eth_netif) {
+        esp_netif_destroy(g_eth_netif);
+        g_eth_netif = NULL;
+    }
+
+    esp_err_t err = w5500_reinstall_driver(&g_eth_handle);
+    if (err != ESP_OK || !g_eth_handle) {
+        ESP_LOGE(TAG, "Driver reinstall failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // Recreate netif + glue and start
+    esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
+    g_eth_netif = esp_netif_new(&cfg);
+    g_eth_glue = esp_eth_new_netif_glue(g_eth_handle);
+    if (!g_eth_netif || !g_eth_glue) {
+        ESP_LOGE(TAG, "Failed to recreate netif/glue");
+        return;
+    }
+    ESP_ERROR_CHECK(esp_netif_attach(g_eth_netif, g_eth_glue));
+
+    err = esp_eth_start(g_eth_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_eth_start after reinstall failed: %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "Full recover done. Wait for Link Up / IP...");
+}
+
 static void task_console(void *arg)
 {
-    ESP_LOGI(TAG, "Console ready. Commands: r=relay, a=ADC log, w=web update, p=set period, v=VERSIONR, f=PHYCFGR, c=calibrate measure, 1/2/3=dummy");
+    ESP_LOGI(TAG, "Console ready. Commands: r=relay, a=ADC log, w=web update, p=set period, v=VERSIONR, f=PHYCFGR, s=soft reset, h=hard reset, c=calibrate measure, 1/2/3=dummy");
     while (1) {
         int c = getchar();
         if (c == EOF) {
@@ -1019,15 +1063,36 @@ static void task_console(void *arg)
             case 'F': {
                 uint8_t phy = 0;
                 if (w5500_read_reg(0x002E, &phy) == ESP_OK) {
-                    ESP_LOGI(TAG, "PHYCFGR = 0x%02X  LNK=%d  SPD=%s  DPX=%s  RST=%d",
+                    // PHYCFGR bit7 RST is active-low: 1 = normal, 0 = PHY held in reset
+                    ESP_LOGI(TAG, "PHYCFGR = 0x%02X  LNK=%d  SPD=%s  DPX=%s  RST=%s",
                              phy,
                              phy & 0x01,
                              (phy & 0x02) ? "100M" : "10M",
                              (phy & 0x04) ? "FULL" : "HALF",
-                             (phy & 0x80) ? 1 : 0);
+                             (phy & 0x80) ? "normal" : "RESET");
                 } else {
                     ESP_LOGE(TAG, "PHYCFGR read failed");
                 }
+                break;
+            }
+            case 's':
+            case 'S': {
+                if (g_eth_handle) {
+                    esp_err_t err = w5500_soft_reset(g_eth_handle);
+                    if (err == ESP_OK) {
+                        ESP_LOGI(TAG, "Soft reset completed. Wait for Link Up / IP...");
+                    } else {
+                        ESP_LOGW(TAG, "Soft reset failed (%s). Doing full recover...", esp_err_to_name(err));
+                        eth_full_recover();
+                    }
+                } else {
+                    ESP_LOGE(TAG, "Ethernet handle not available");
+                }
+                break;
+            }
+            case 'h':
+            case 'H': {
+                eth_full_recover();
                 break;
             }
             case 'c':
@@ -1048,7 +1113,7 @@ static void task_console(void *arg)
             case '\r':
                 break;
             default:
-                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, p, v, f, c, 1, 2, 3", c, c);
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, p, v, f, s, h, c, 1, 2, 3", c, c);
                 break;
         }
     }
@@ -1090,9 +1155,9 @@ esp_err_t cc_tcpip_stack_init(esp_eth_handle_t eth_handle)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
-    esp_netif_t *eth_netif = esp_netif_new(&cfg);
-    esp_eth_netif_glue_handle_t eth_netif_glue = esp_eth_new_netif_glue(eth_handle);
-    ESP_ERROR_CHECK(esp_netif_attach(eth_netif, eth_netif_glue));
+    g_eth_netif = esp_netif_new(&cfg);
+    g_eth_glue = esp_eth_new_netif_glue(eth_handle);
+    ESP_ERROR_CHECK(esp_netif_attach(g_eth_netif, g_eth_glue));
 
     return ESP_OK;
 }
@@ -1131,6 +1196,7 @@ void app_main(void)
     esp_eth_handle_t eth_handle;
 
     ESP_ERROR_CHECK(w5500_init(&eth_handle));
+    g_eth_handle = eth_handle;
     ESP_ERROR_CHECK(cc_tcpip_stack_init(eth_handle));
 
     // Register user defined event handers

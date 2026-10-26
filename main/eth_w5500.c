@@ -23,6 +23,9 @@ static const char *TAG = "w5500_init";
 static bool gpio_isr_svc_init_by_eth = false; // indicates that we initialized the GPIO ISR service
 static spi_device_handle_t debug_spi = NULL;
 
+// Forward declaration — defined later in this file
+static esp_eth_handle_t eth_init_spi(spi_eth_module_config_t *spi_eth_module_config, esp_eth_mac_t **mac_out, esp_eth_phy_t **phy_out);
+
 // ---------- Debug SPI register access ----------
 static esp_err_t w5500_debug_spi_init(void)
 {
@@ -58,6 +61,159 @@ esp_err_t w5500_read_reg(uint16_t addr, uint8_t *val)
         *val = rx[3];
     }
     return err;
+}
+
+esp_err_t w5500_write_reg(uint16_t addr, uint8_t val)
+{
+    if (!debug_spi) {
+        esp_err_t err = w5500_debug_spi_init();
+        if (err != ESP_OK) return err;
+    }
+
+    // Control byte: BSB=0, Write (RWB=1), Variable length → 0x04
+    uint8_t tx[4] = { (uint8_t)(addr >> 8), (uint8_t)(addr & 0xFF), 0x04, val };
+    spi_transaction_t t = {
+        .length = 32,
+        .tx_buffer = tx,
+    };
+    return spi_device_transmit(debug_spi, &t);
+}
+
+esp_err_t w5500_soft_reset(esp_eth_handle_t eth_handle)
+{
+    if (!eth_handle) return ESP_ERR_INVALID_ARG;
+
+    ESP_LOGI(TAG, "W5500 software reset requested");
+
+    // Stop the driver so it doesn't touch the chip during reset
+    esp_err_t err = esp_eth_stop(eth_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_eth_stop returned %s (continuing)", esp_err_to_name(err));
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    // MR (0x0000) bit7 = RST
+    err = w5500_write_reg(0x0000, 0x80);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write MR.RST");
+        return err;
+    }
+
+    // Chip needs time to complete internal reset
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Do NOT write PHYCFGR here.
+    // RST bit is active-low: 0 = PHY held in reset, 1 = normal.
+    // Writing 0x78 (RST=0) was holding the PHY in reset and causing
+    // "auto negotiation is disabled" on esp_eth_start().
+    // Let the ESP-IDF W5500 driver configure the PHY itself.
+
+    // Re-start: driver re-inits MAC address, PHY, sockets, etc.
+    err = esp_eth_start(eth_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_eth_start after soft reset failed (%s). Caller should use full reinstall.",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "W5500 software reset + re-init done");
+    return ESP_OK;
+}
+
+esp_err_t w5500_reinstall_driver(esp_eth_handle_t *eth_handle_io)
+{
+    if (!eth_handle_io || !*eth_handle_io) return ESP_ERR_INVALID_ARG;
+
+    esp_eth_handle_t old = *eth_handle_io;
+    ESP_LOGI(TAG, "W5500 full driver reinstall requested");
+
+    // Best-effort stop (may fail if state already inconsistent)
+    esp_err_t err = esp_eth_stop(old);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_eth_stop returned %s (continuing with reinstall)", esp_err_to_name(err));
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    esp_eth_mac_t *mac = NULL;
+    esp_eth_phy_t *phy = NULL;
+    esp_eth_get_mac_instance(old, &mac);
+    esp_eth_get_phy_instance(old, &phy);
+
+    err = esp_eth_driver_uninstall(old);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "driver uninstall failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    if (mac) mac->del(mac);
+    if (phy) phy->del(phy);
+    *eth_handle_io = NULL;
+
+    // Hardware reset of the chip
+    gpio_set_level(ETH_RST_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    gpio_set_level(ETH_RST_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    ESP_LOGI(TAG, "W5500 RST pin pulsed");
+
+    // Rebuild SPI Ethernet module config and reinstall driver
+    spi_eth_module_config_t cfg = { 0 };
+    cfg.spi_cs_gpio = ETH_SPI_CS;
+    cfg.int_gpio = ETH_INT_PIN;
+    cfg.polling_ms = 0;
+    cfg.phy_reset_gpio = ETH_RST_PIN;
+    cfg.phy_addr = 1;
+
+    uint8_t base_mac[ETH_ADDR_LEN];
+    uint8_t local_mac[ETH_ADDR_LEN];
+    if (esp_efuse_mac_get_default(base_mac) == ESP_OK) {
+        esp_derive_local_mac(local_mac, base_mac);
+        cfg.mac_addr = local_mac;
+    }
+
+    esp_eth_handle_t neu = eth_init_spi(&cfg, NULL, NULL);
+    if (!neu) {
+        ESP_LOGE(TAG, "driver reinstall failed");
+        return ESP_FAIL;
+    }
+
+    *eth_handle_io = neu;
+    ESP_LOGI(TAG, "W5500 driver reinstalled");
+    return ESP_OK;
+}
+
+esp_err_t w5500_hard_reset_and_start(esp_eth_handle_t eth_handle)
+{
+    if (!eth_handle) return ESP_ERR_INVALID_ARG;
+
+    ESP_LOGI(TAG, "W5500 hardware reset requested");
+
+    esp_err_t err = esp_eth_stop(eth_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_eth_stop returned %s (continuing)", esp_err_to_name(err));
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    // RST pin pulse (do this even if stop failed — chip needs a known state)
+    gpio_set_level(ETH_RST_PIN, 0);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    gpio_set_level(ETH_RST_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(150));   // longer settle after hard reset
+    ESP_LOGI(TAG, "W5500 RST pin pulsed");
+
+    // Do not touch PHYCFGR — RST bit is active-low (0=reset, 1=normal).
+    // Driver will configure auto-negotiation on esp_eth_start().
+
+    err = esp_eth_start(eth_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_eth_start after hard reset failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Driver internal state may be inconsistent. Power-cycle recommended.");
+        return err;
+    }
+
+    ESP_LOGI(TAG, "W5500 hardware reset + re-init done");
+    return ESP_OK;
 }
 
 static void w5500_hard_reset(void)
