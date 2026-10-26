@@ -31,7 +31,7 @@
 #include "driver/uart.h"
 #include "driver/spi_master.h"
 #include "esp_rom_sys.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "esp_eth.h"
 #include "esp_eth_mac.h"
 #include "esp_eth_phy.h"
@@ -826,24 +826,34 @@ static void task_pulse_data_collection(void *arg)
 #define PCA9555_REG_CONFIG0     0x06
 #define PCA9555_REG_CONFIG1     0x07
 
+static i2c_master_bus_handle_t i2c_bus = NULL;
+static i2c_master_dev_handle_t pca9555_dev = NULL;
+
 static esp_err_t pca9555_write_reg(uint8_t reg, uint8_t val)
 {
+    if (!pca9555_dev) return ESP_ERR_INVALID_STATE;
     uint8_t buf[2] = {reg, val};
-    return i2c_master_write_to_device(I2C_NUM_0, PCA9555_ADDR, buf, 2, pdMS_TO_TICKS(100));
+    return i2c_master_transmit(pca9555_dev, buf, 2, pdMS_TO_TICKS(100));
 }
 
 static void init_i2c_pca9555(void)
 {
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = I2C_NUM_0,
         .sda_io_num = I2C_SDA_PIN,
         .scl_io_num = I2C_SCL_PIN,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = 100000,  // 100 kHz
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
     };
-    ESP_ERROR_CHECK(i2c_param_config(I2C_NUM_0, &conf));
-    ESP_ERROR_CHECK(i2c_driver_install(I2C_NUM_0, conf.mode, 0, 0, 0));
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &i2c_bus));
+
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = PCA9555_ADDR,
+        .scl_speed_hz = 100000,
+    };
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus, &dev_cfg, &pca9555_dev));
 
     // All pins as outputs (0 = output)
     ESP_ERROR_CHECK(pca9555_write_reg(PCA9555_REG_CONFIG0, 0x00));
@@ -853,7 +863,7 @@ static void init_i2c_pca9555(void)
     ESP_ERROR_CHECK(pca9555_write_reg(PCA9555_REG_OUTPUT0, 0x00));
     ESP_ERROR_CHECK(pca9555_write_reg(PCA9555_REG_OUTPUT1, 0x00));
 
-    ESP_LOGI(TAG, "PCA9555PWR initialized (addr=0x%02X)", PCA9555_ADDR);
+    ESP_LOGI(TAG, "PCA9555PWR initialized (addr=0x%02X, new I2C master driver)", PCA9555_ADDR);
 }
 
 static volatile bool relay_test_enabled = false;
