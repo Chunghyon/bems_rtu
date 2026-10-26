@@ -26,6 +26,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "driver/spi_master.h"
@@ -531,6 +532,35 @@ static void IRAM_ATTR drdy_isr_handler(void *arg)
 bool adc_log_enabled = false;
 bool web_update_enabled = false;
 int web_update_period_sec = 5;   // seconds (1~300)
+
+// ---------- NVS persistence for web update period ----------
+#define NVS_NAMESPACE   "rtu_cfg"
+#define NVS_KEY_PERIOD  "web_period"
+
+static void nvs_save_web_period(int period)
+{
+    nvs_handle_t handle;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+        nvs_set_i32(handle, NVS_KEY_PERIOD, period);
+        nvs_commit(handle);
+        nvs_close(handle);
+    }
+}
+
+static void nvs_load_web_period(void)
+{
+    nvs_handle_t handle;
+    int32_t val = 0;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        if (nvs_get_i32(handle, NVS_KEY_PERIOD, &val) == ESP_OK) {
+            if (val >= 1 && val <= 300) {
+                web_update_period_sec = (int)val;
+                ESP_LOGI(TAG, "Loaded web update period from NVS: %d s", web_update_period_sec);
+            }
+        }
+        nvs_close(handle);
+    }
+}
 static void task_ads131m08(void *arg)
 {
     int32_t channels[ADS131M08_NUM_CH];
@@ -915,25 +945,48 @@ static void task_console(void *arg)
                 ESP_LOGI(TAG, "Enter web update period in seconds (1~300), then Enter:");
                 char numbuf[8] = {0};
                 int idx = 0;
-                while (idx < (int)sizeof(numbuf) - 1) {
+                // Echo prompt
+                printf("> ");
+                fflush(stdout);
+
+                while (1) {
                     int ch = getchar();
                     if (ch == EOF) {
                         vTaskDelay(pdMS_TO_TICKS(20));
                         continue;
                     }
+                    // Enter
                     if (ch == '\n' || ch == '\r') {
+                        putchar('\n');
+                        fflush(stdout);
                         break;
                     }
-                    if (ch >= '0' && ch <= '9') {
+                    // Backspace / Delete
+                    if (ch == 0x08 || ch == 0x7F) {
+                        if (idx > 0) {
+                            idx--;
+                            numbuf[idx] = '\0';
+                            // Erase last character on terminal
+                            printf("\b \b");
+                            fflush(stdout);
+                        }
+                        continue;
+                    }
+                    // Digit
+                    if (ch >= '0' && ch <= '9' && idx < (int)sizeof(numbuf) - 1) {
                         numbuf[idx++] = (char)ch;
+                        numbuf[idx] = '\0';
+                        putchar(ch);
+                        fflush(stdout);
                     }
                 }
-                numbuf[idx] = '\0';
+
                 if (idx > 0) {
                     int val = atoi(numbuf);
                     if (val >= 1 && val <= 300) {
                         web_update_period_sec = val;
-                        ESP_LOGI(TAG, "Web update period set to %d seconds", web_update_period_sec);
+                        nvs_save_web_period(web_update_period_sec);
+                        ESP_LOGI(TAG, "Web update period set to %d seconds (saved to NVS)", web_update_period_sec);
                     } else {
                         ESP_LOGI(TAG, "Invalid value '%s' (must be 1~300). Period unchanged (%ds)", numbuf, web_update_period_sec);
                     }
@@ -1023,6 +1076,9 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    // Load persisted settings
+    nvs_load_web_period();
 
     // Install the GPIO driver's ETS_GPIO_INTR_SOURCE ISR handler service, 
     //  which allows per-pin GPIO interrupt handlers.

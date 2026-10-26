@@ -91,8 +91,8 @@
 #define PULSE_INPUT_4           GPIO_NUM_20
 
 // ========== Status LEDs ==========
-#define LED_STATUS_GREEN        GPIO_NUM_40 //exchange w/red
-#define LED_STATUS_RED          GPIO_NUM_39
+#define LED_STATUS_GREEN        GPIO_NUM_39
+#define LED_STATUS_RED          GPIO_NUM_40
 
 // ========== I2C to control PCA9555PWR ==========
 #define I2C_SDA_PIN             GPIO_NUM_8
