@@ -25,48 +25,8 @@ extern "C" {
 esp_err_t w5500_init(esp_eth_handle_t *eth_handle_out);
 
 /**
- * @brief Read a W5500 common register via SPI (for debug).
- *        Safe to call from console when investigating link issues.
- * @param addr  Register offset (e.g. 0x0039 = VERSIONR, 0x002E = PHYCFGR)
- * @param val   Output byte
- * @return ESP_OK on success
- */
-esp_err_t w5500_read_reg(uint16_t addr, uint8_t *val);
-
-/**
- * @brief Read a W5500 register with the Ethernet driver stopped.
- *        Stops the driver, reads, then starts again.
- *        *val is valid when return is ESP_OK (even if restart failed).
- *        If start_ok is non-NULL, it is set false when esp_eth_start fails
- *        (caller should full-recover in that case).
- */
-esp_err_t w5500_read_reg_exclusive(esp_eth_handle_t eth_handle, uint16_t addr,
-                                   uint8_t *val, bool *start_ok);
-
-/**
- * @brief Stop the driver, dump W5500 interrupt cause (IR / SIR / Sn_IR), restart.
- *        Prints a decoded log. *start_ok false means caller should full-recover.
- */
-esp_err_t w5500_dump_int_cause(esp_eth_handle_t eth_handle, bool *start_ok);
-
-/**
- * @brief Write a W5500 common register via SPI (for debug).
- */
-esp_err_t w5500_write_reg(uint16_t addr, uint8_t val);
-
-/**
- * @brief Software-reset the W5500 (MR.RST=1) then re-start the Ethernet driver.
- *        Stops the driver, issues soft reset, waits, then calls esp_eth_start()
- *        so MAC/PHY/sockets are re-initialized.
- * @param eth_handle  Active Ethernet handle (must not be NULL)
- * @return ESP_OK on success
- */
-esp_err_t w5500_soft_reset(esp_eth_handle_t eth_handle);
-
-/**
  * @brief Full recovery: RST pin pulse + uninstall/reinstall Ethernet driver.
- *        Use this when the driver internal state is inconsistent
- *        (e.g. after a failed soft-reset start).
+ *        Use this when the driver internal state is inconsistent.
  *        On success, *eth_handle_io is replaced with the new handle.
  *        Caller must re-attach netif glue and call esp_eth_start().
  * @param eth_handle_io  in/out Ethernet handle

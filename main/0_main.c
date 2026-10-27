@@ -980,13 +980,13 @@ static void task_heartbeat(void *arg)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
         sec += 10;
-        ESP_LOGI(TAG, "[HB] uptime %lu s", (unsigned long)sec);
+        //ESP_LOGI(TAG, "[HB] uptime %lu s", (unsigned long)sec);
     }
 }
 
 static void task_console(void *arg)
 {
-    ESP_LOGI(TAG, "Console ready. Commands: r, a, w, p, v=VERSIONR, f=PHYCFGR, i=INT pin, n=INT cause, s, h, c, 1/2/3");
+    ESP_LOGI(TAG, "Console ready. Commands: r, a, w, p, i=INT pin, h=hard reset, c, 1/2/3");
     while (1) {
         int c = getchar();
         if (c == EOF) {
@@ -1059,76 +1059,12 @@ static void task_console(void *arg)
                 }
                 break;
             }
-            case 'v':
-            case 'V': {
-                uint8_t ver = 0;
-                bool started = false;
-                if (g_eth_handle &&
-                    w5500_read_reg_exclusive(g_eth_handle, 0x0039, &ver, &started) == ESP_OK) {
-                    ESP_LOGI(TAG, "VERSIONR = 0x%02X (expect 0x04 if SPI OK)", ver);
-                } else {
-                    ESP_LOGE(TAG, "VERSIONR read failed");
-                }
-                if (!started) {
-                    ESP_LOGW(TAG, "Restart failed, full recover...");
-                    eth_full_recover();
-                }
-                break;
-            }
-            case 'f':
-            case 'F': {
-                uint8_t phy = 0;
-                bool started = false;
-                if (g_eth_handle &&
-                    w5500_read_reg_exclusive(g_eth_handle, 0x002E, &phy, &started) == ESP_OK) {
-                    ESP_LOGI(TAG, "PHYCFGR = 0x%02X  LNK=%d  SPD=%s  DPX=%s  RST=%s",
-                             phy,
-                             phy & 0x01,
-                             (phy & 0x02) ? "100M" : "10M",
-                             (phy & 0x04) ? "FULL" : "HALF",
-                             (phy & 0x80) ? "normal" : "RESET");
-                } else {
-                    ESP_LOGE(TAG, "PHYCFGR read failed");
-                }
-                if (!started) {
-                    ESP_LOGW(TAG, "Restart failed, full recover...");
-                    eth_full_recover();
-                }
-                break;
-            }
             case 'i':
             case 'I': {
-                // No SPI. Safe while link is up.
+                // GPIO only. No SPI, does not touch the Ethernet driver.
                 int level = gpio_get_level(ETH_INT_PIN);
                 ESP_LOGI(TAG, "INT pin (GPIO%d) = %d (%s)", ETH_INT_PIN, level,
                          level ? "released/idle" : "asserted/LOW");
-                break;
-            }
-            case 'n':
-            case 'N': {
-                bool started = false;
-                if (!g_eth_handle || w5500_dump_int_cause(g_eth_handle, &started) != ESP_OK) {
-                    ESP_LOGE(TAG, "INT cause dump failed");
-                }
-                if (!started) {
-                    ESP_LOGW(TAG, "Restart failed, full recover...");
-                    eth_full_recover();
-                }
-                break;
-            }
-            case 's':
-            case 'S': {
-                if (g_eth_handle) {
-                    esp_err_t err = w5500_soft_reset(g_eth_handle);
-                    if (err == ESP_OK) {
-                        ESP_LOGI(TAG, "Soft reset completed. Wait for Link Up / IP...");
-                    } else {
-                        ESP_LOGW(TAG, "Soft reset failed (%s). Doing full recover...", esp_err_to_name(err));
-                        eth_full_recover();
-                    }
-                } else {
-                    ESP_LOGE(TAG, "Ethernet handle not available");
-                }
                 break;
             }
             case 'h':
@@ -1154,7 +1090,7 @@ static void task_console(void *arg)
             case '\r':
                 break;
             default:
-                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, p, v, f, i, n, s, h, c, 1, 2, 3", c, c);
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, p, i, h, c, 1, 2, 3", c, c);
                 break;
         }
     }
