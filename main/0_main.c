@@ -1089,7 +1089,7 @@ static void task_heartbeat(void *arg)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
         sec += 10;
-        ESP_LOGI(TAG, "[HB] uptime %lu s", (unsigned long)sec);
+        //ESP_LOGI(TAG, "[HB] uptime %lu s", (unsigned long)sec);
     }
 }
 
@@ -1297,11 +1297,11 @@ void app_main(void)
 #if PP_ENABLE_ADC
     init_ads131m08();
     xTaskCreate(task_ads131m08, "ads131m08", 4096, NULL, 8, NULL);
-    xTaskCreate(task_power_calc, "power", 4096, NULL, 5, NULL);
+    xTaskCreate(task_power_calc, "power", 8192, NULL, 5, NULL);
  #endif
  
     xTaskCreate(task_console, "console", 4096, NULL, 3, NULL);
-    xTaskCreate(task_heartbeat, "heartbeat", 2048, NULL, 2, NULL);
+    xTaskCreate(task_heartbeat, "heartbeat", 4096, NULL, 2, NULL);
 
     ESP_LOGI(TAG, "RTU ready......");
 }
