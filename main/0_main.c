@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -326,12 +327,49 @@ static uint16_t ads131m08_osr_to_clock(uint16_t osr, bool channels_on)
 
 #define ADS131M08_NUM_CH    8
 
+static void IRAM_ATTR drdy_isr_handler(void *arg);
 // Per-channel offset (subtracted from every sample). Filled by ads131m08_calibrate().
 static int32_t adc1_offset[ADS131M08_NUM_CH] = {0};
 static int32_t adc2_offset[ADS131M08_NUM_CH] = {0};
 
 static void ads131m08_calibrate_reserved(uint16_t samples);
 static void ads131m08_calibrate_measure(uint16_t samples);
+
+// ========== ADS131M08 DRDY interrupt + 1s average ==========
+static int32_t adc1_latest[ADS131M08_NUM_CH] = {0};
+static int64_t adc1_sum[ADS131M08_NUM_CH] = {0};
+static uint32_t adc1_sample_count = 0;
+static int32_t adc1_avg[ADS131M08_NUM_CH] = {0};
+
+static int32_t adc2_latest[ADS131M08_NUM_CH] = {0};
+static int64_t adc2_sum[ADS131M08_NUM_CH] = {0};
+static uint32_t adc2_sample_count = 0;
+static int32_t adc2_avg[ADS131M08_NUM_CH] = {0};
+static SemaphoreHandle_t drdy_sem = NULL;
+
+// ---------- 3-phase power (DRDY → ring → 100 ms calc → BEMS) ----------
+#define POWER_PHASES        3
+#define POWER_RING_SIZE     2048
+#define POWER_SPS           (8192000 / (2 * PP_ADC_OSR))   // 1024 → 4000
+
+typedef struct {
+    int32_t v[POWER_PHASES];
+    int32_t i[POWER_PHASES];
+} power_sample_t;
+
+static power_sample_t power_ring[POWER_RING_SIZE];
+static volatile uint32_t power_wr = 0;
+
+typedef struct {
+    float vrms;
+    float irms;
+    float kw;
+    float pf;
+    uint32_t n;
+} power_phase_t;
+
+static power_phase_t power_result[POWER_PHASES];
+static uint32_t power_sps_meas = 0;
 
 static void init_ads131m08(void)
 {
@@ -408,23 +446,11 @@ static void init_ads131m08(void)
     drdy_sem = xSemaphoreCreateBinary();
     gpio_set_intr_type(ADC_DRDY_PIN, GPIO_INTR_NEGEDGE);
     gpio_isr_handler_add(ADC_DRDY_PIN, drdy_isr_handler, NULL);
-    ESP_LOGI(TAG, "ADS131M08 DRDY interrupt mode");
+    ESP_LOGI(TAG, "ADS131M08 DRDY interrupt mode (GPIO%d, %d SPS)", ADC_DRDY_PIN, POWER_SPS);
 #else
     ESP_LOGI(TAG, "ADS131M08 on-demand mode (no DRDY)");
 #endif
 }
-
-// ========== ADS131M08 DRDY interrupt + 1s average ==========
-static int32_t adc1_latest[ADS131M08_NUM_CH] = {0};
-static int64_t adc1_sum[ADS131M08_NUM_CH] = {0};
-static uint32_t adc1_sample_count = 0;
-static int32_t adc1_avg[ADS131M08_NUM_CH] = {0};
-
-static int32_t adc2_latest[ADS131M08_NUM_CH] = {0};
-static int64_t adc2_sum[ADS131M08_NUM_CH] = {0};
-static uint32_t adc2_sample_count = 0;
-static int32_t adc2_avg[ADS131M08_NUM_CH] = {0};
-static SemaphoreHandle_t drdy_sem = NULL;
 
 // Full 10-word frame, CS held for entire transaction
 static void ads131m08_read_frame(spi_device_handle_t dev, gpio_num_t cs, int32_t *channels)
@@ -591,6 +617,24 @@ static void task_ads131m08(void *arg)
         }
         adc1_sample_count++;
 
+        // Push 3-phase V/I into the power ring (independent of the 1 s log)
+        {
+            power_sample_t s = {
+                .v = {
+                    channels[ADC1_AC_VOLTAGE1],
+                    channels[ADC1_AC_VOLTAGE2],
+                    channels[ADC1_AC_VOLTAGE3],
+                },
+                .i = {
+                    channels[ADC1_AC_CURRENT1],
+                    channels[ADC1_AC_CURRENT2],
+                    channels[ADC1_AC_CURRENT3],
+                },
+            };
+            power_ring[power_wr % POWER_RING_SIZE] = s;
+            power_wr++;
+        }
+
         ads131m08_read_frame(adc2_spi, ADC2_SPI_CS, channels);
         for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
             adc2_sum[ch] += channels[ch];
@@ -643,6 +687,61 @@ static void task_ads131m08(void *arg)
             }
 
             last_log_tick = xTaskGetTickCount();
+        }
+    }
+}
+
+static void task_power_calc(void *arg)
+{
+    uint32_t last_wr = 0;
+    uint32_t bems_acc_ms = 0;
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(PP_POWER_WINDOW_MS));
+
+        uint32_t now = power_wr;
+        uint32_t n = now - last_wr;
+        if (n > POWER_RING_SIZE) n = POWER_RING_SIZE;
+        power_sps_meas = (PP_POWER_WINDOW_MS > 0) ? (n * 1000 / PP_POWER_WINDOW_MS) : 0;
+
+        if (n >= 8) {
+            double sum_v2[POWER_PHASES] = {0};
+            double sum_i2[POWER_PHASES] = {0};
+            double sum_p[POWER_PHASES] = {0};
+
+            for (uint32_t k = now - n; k < now; k++) {
+                const power_sample_t *s = &power_ring[k % POWER_RING_SIZE];
+                for (int p = 0; p < POWER_PHASES; p++) {
+                    double v = (double)s->v[p] * PP_V_PER_COUNT;
+                    double i = (double)s->i[p] * PP_I_PER_COUNT;
+                    sum_v2[p] += v * v;
+                    sum_i2[p] += i * i;
+                    sum_p[p] += v * i;
+                }
+            }
+            for (int p = 0; p < POWER_PHASES; p++) {
+                float vrms = sqrtf((float)(sum_v2[p] / n));
+                float irms = sqrtf((float)(sum_i2[p] / n));
+                float p_w  = (float)(sum_p[p] / n);
+                float s_va = vrms * irms;
+                power_result[p].vrms = vrms;
+                power_result[p].irms = irms;
+                power_result[p].kw   = p_w / 1000.0f;
+                power_result[p].pf   = (s_va > 1e-6f) ? (p_w / s_va) : 0.0f;
+                power_result[p].n    = n;
+            }
+        }
+        last_wr = now;
+
+        bems_acc_ms += PP_POWER_WINDOW_MS;
+        if (bems_acc_ms >= (uint32_t)PP_BEMS_PERIOD_SEC * 1000) {
+            bems_acc_ms = 0;
+            ESP_LOGI(TAG, "BEMS P1 Vrms=%.2f Irms=%.3f kW=%.3f PF=%.3f | "
+                          "P2 %.2f/%.3f/%.3f/%.3f | P3 %.2f/%.3f/%.3f/%.3f (%lu sps)",
+                     power_result[0].vrms, power_result[0].irms, power_result[0].kw, power_result[0].pf,
+                     power_result[1].vrms, power_result[1].irms, power_result[1].kw, power_result[1].pf,
+                     power_result[2].vrms, power_result[2].irms, power_result[2].kw, power_result[2].pf,
+                     (unsigned long)power_sps_meas);
         }
     }
 }
@@ -724,7 +823,7 @@ static void init_spi2_host(void)
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     // Use heap to avoid httpd stack overflow
-    char *buf = malloc(2048);
+    char *buf = malloc(3072);
     if (!buf) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
@@ -738,7 +837,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         snprintf(update_status, sizeof(update_status), "ON (%ds)", web_update_period_sec);
     }
 
-    int len = snprintf(buf, 2048,
+    int len = snprintf(buf, 3072,
         "<!DOCTYPE html><html><head><meta charset='utf-8'>%s"
         "<title>BEMS RTU</title>"
         "<style>"
@@ -762,20 +861,30 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         update_status,
         pulse_counts[0], pulse_counts[1], pulse_counts[2], pulse_counts[3]);
 
-    for (int ch = 0; ch < ADS131M08_NUM_CH && len < 2048 - 80; ch++) {
-        len += snprintf(buf + len, 2048 - len,
+    for (int ch = 0; ch < ADS131M08_NUM_CH && len < 3072 - 80; ch++) {
+        len += snprintf(buf + len, 3072 - len,
                         "<tr><td>%s</td><td>%ld</td></tr>", adc1_ch_names[ch], adc1_avg[ch]);
     }
-    len += snprintf(buf + len, 2048 - len, "</table></div>"
+    len += snprintf(buf + len, 3072 - len, "</table></div>"
         "<div class='box'><h2>ADC2 (1s avg)</h2><table><tr><th>CH</th><th>Value</th></tr>");
 
-    for (int ch = 0; ch < ADS131M08_NUM_CH && len < 2048 - 80; ch++) {
-        len += snprintf(buf + len, 2048 - len,
+    for (int ch = 0; ch < ADS131M08_NUM_CH && len < 3072 - 80; ch++) {
+        len += snprintf(buf + len, 3072 - len,
                         "<tr><td>%s</td><td>%ld</td></tr>", adc2_ch_names[ch], adc2_avg[ch]);
     }
-    len += snprintf(buf + len, 2048 - len,
+    len += snprintf(buf + len, 3072 - len,
         "</table></div></div>"
-        "<p><small>ESP32-S3 RTU</small></p></body></html>");
+        "<div class='box'><h2>3-phase (100 ms)</h2>"
+        "<table><tr><th>Ph</th><th>Vrms</th><th>Irms</th><th>kW</th><th>PF</th></tr>"
+        "<tr><td>1</td><td>%.2f</td><td>%.3f</td><td>%.3f</td><td>%.3f</td></tr>"
+        "<tr><td>2</td><td>%.2f</td><td>%.3f</td><td>%.3f</td><td>%.3f</td></tr>"
+        "<tr><td>3</td><td>%.2f</td><td>%.3f</td><td>%.3f</td><td>%.3f</td></tr>"
+        "</table><small>%lu sps</small></div>"
+        "<p><small>ESP32-S3 RTU</small></p></body></html>",
+        power_result[0].vrms, power_result[0].irms, power_result[0].kw, power_result[0].pf,
+        power_result[1].vrms, power_result[1].irms, power_result[1].kw, power_result[1].pf,
+        power_result[2].vrms, power_result[2].irms, power_result[2].kw, power_result[2].pf,
+        (unsigned long)power_sps_meas);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
@@ -980,13 +1089,13 @@ static void task_heartbeat(void *arg)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
         sec += 10;
-        //ESP_LOGI(TAG, "[HB] uptime %lu s", (unsigned long)sec);
+        ESP_LOGI(TAG, "[HB] uptime %lu s", (unsigned long)sec);
     }
 }
 
 static void task_console(void *arg)
 {
-    ESP_LOGI(TAG, "Console ready. Commands: r, a, w, p, i=INT pin, h=hard reset, c, 1/2/3");
+    ESP_LOGI(TAG, "Console ready. Commands: r, a, w, p, v=VERSIONR, f=PHYCFGR, i=INT pin, n=INT cause, s, h, c, 1/2/3");
     while (1) {
         int c = getchar();
         if (c == EOF) {
@@ -1061,7 +1170,7 @@ static void task_console(void *arg)
             }
             case 'i':
             case 'I': {
-                // GPIO only. No SPI, does not touch the Ethernet driver.
+                // No SPI. Safe while link is up.
                 int level = gpio_get_level(ETH_INT_PIN);
                 ESP_LOGI(TAG, "INT pin (GPIO%d) = %d (%s)", ETH_INT_PIN, level,
                          level ? "released/idle" : "asserted/LOW");
@@ -1090,7 +1199,7 @@ static void task_console(void *arg)
             case '\r':
                 break;
             default:
-                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, p, i, h, c, 1, 2, 3", c, c);
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use r, a, w, p, v, f, i, n, s, h, c, 1, 2, 3", c, c);
                 break;
         }
     }
@@ -1187,7 +1296,8 @@ void app_main(void)
 
 #if PP_ENABLE_ADC
     init_ads131m08();
-    xTaskCreate(task_ads131m08, "ads131m08", 4096, NULL, 6, NULL);
+    xTaskCreate(task_ads131m08, "ads131m08", 4096, NULL, 8, NULL);
+    xTaskCreate(task_power_calc, "power", 4096, NULL, 5, NULL);
  #endif
  
     xTaskCreate(task_console, "console", 4096, NULL, 3, NULL);

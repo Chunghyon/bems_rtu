@@ -20,8 +20,8 @@
 #define PP_ENABLE_ADC			1
 
 // ADC conversion mode: 1 = use DRDY interrupt, 0 = on-demand (timed read)
-#define PP_ADC_USE_DRDY			0
-// On-demand sample interval in milliseconds
+#define PP_ADC_USE_DRDY			1
+// On-demand sample interval in milliseconds (used only when PP_ADC_USE_DRDY=0)
 // Range: 1 ~ 60000 (1 ms ~ 60 s). Must be >= ADC conversion period.
 #define PP_ADC_SAMPLE_MS		250
 
@@ -30,7 +30,17 @@
 // With 8.192 MHz CLKIN: data rate = 8.192e6 / (2 * OSR)
 //   128→32 kHz, 256→16 kHz, 512→8 kHz, 1024→4 kHz,
 //   2048→2 kHz, 4096→1 kHz, 8192→500 Hz, 16384→250 Hz
-#define PP_ADC_OSR				16384
+#define PP_ADC_OSR				1024
+
+// 3-phase power calculation
+#define PP_POWER_WINDOW_MS		100     // RMS / power window
+#define PP_BEMS_PERIOD_SEC		5       // publish interval (1~5 s)
+// Scale: ADC LSB (≈1.2 V / 2^23) × PT or CT ratio. Tune to the front-end.
+#define PP_ADC_LSB_V			(1.2f / 8388608.0f)
+#define PP_PT_RATIO				1.0f    // primary volts / ADC-pin volt
+#define PP_CT_RATIO				1.0f    // primary amps / ADC-pin volt
+#define PP_V_PER_COUNT			(PP_ADC_LSB_V * PP_PT_RATIO)
+#define PP_I_PER_COUNT			(PP_ADC_LSB_V * PP_CT_RATIO)
 
 // Ethernet SPI host selection
 // 0 = share SPI2_HOST with ADC (original pins GPIO11/13/12)
@@ -64,7 +74,7 @@
 
 // ======= ADC Common(ADS131M08) ========
 #define ADC_SYNC_PIN			GPIO_NUM_3
-#define ADC_DRDY_PIN			GPIO_NUM_46
+#define ADC_DRDY_PIN			GPIO_NUM_47   // was 46 (strapping); 47 is not a strap pin
 #define ADC_SPI_CLK_SPEED_HZ    8000000
 
 // ========== ADC1(ADS131M08) ==========
