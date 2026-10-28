@@ -146,8 +146,8 @@ static esp_err_t spi_bus_init(void)
 #if PP_ETH_USE_SPI3
     // Dedicated SPI3 bus for W5500
     spi_bus_config_t eth_buscfg = {
-        .miso_io_num = ETH_SPI_MISO,
         .mosi_io_num = ETH_SPI_MOSI,
+        .miso_io_num = ETH_SPI_MISO,
         .sclk_io_num = ETH_SPI_CLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,

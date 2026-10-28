@@ -56,23 +56,31 @@
 // 1 = use dedicated SPI3_HOST (MOSI=GPIO35, MISO=GPIO36, CLK=GPIO37)
 #define PP_ETH_USE_SPI3			1
 
+#define SPI2_MOSI				GPIO_NUM_11
+#define SPI2_MISO				GPIO_NUM_13
+#define SPI2_CLK				GPIO_NUM_12
+
+#define SPI3_MOSI				GPIO_NUM_2
+#define SPI3_MISO				GPIO_NUM_48
+#define SPI3_CLK				GPIO_NUM_1
+
 // ========== ADC SPI (always SPI2_HOST) ==========
 #define ADC_SPI_HOST			SPI2_HOST
-#define ADC_SPI_MOSI			GPIO_NUM_11
-#define ADC_SPI_MISO			GPIO_NUM_13
-#define ADC_SPI_CLK				GPIO_NUM_12
+#define ADC_SPI_MOSI			SPI2_MOSI
+#define ADC_SPI_MISO			SPI2_MISO
+#define ADC_SPI_CLK				SPI2_CLK
 
 // ========== Ethernet SPI ==========
 #if PP_ETH_USE_SPI3
 #define ETH_SPI_HOST			SPI3_HOST
-#define ETH_SPI_MOSI			GPIO_NUM_2
-#define ETH_SPI_MISO			GPIO_NUM_48
-#define ETH_SPI_CLK				GPIO_NUM_1
+#define ETH_SPI_MOSI			SPI3_MOSI
+#define ETH_SPI_MISO			SPI3_MISO
+#define ETH_SPI_CLK				SPI3_CLK
 #else
 #define ETH_SPI_HOST			SPI2_HOST
-#define ETH_SPI_MOSI			GPIO_NUM_11
-#define ETH_SPI_MISO			GPIO_NUM_13
-#define ETH_SPI_CLK				GPIO_NUM_12
+#define ETH_SPI_MOSI			SPI2_MOSI
+#define ETH_SPI_MISO			SPI2_MISO
+#define ETH_SPI_CLK				SPI2_CLK
 #endif
 #define ETH_SPI_CLK_SPEED_HZ	16000000  // 16 MHz for W5500, can be adjusted
 
