@@ -61,9 +61,13 @@ static void refresh_regs(void)
         put_u32(10 + p * 2, (uint32_t)(m.vrms[p] * 100.0f + 0.5f));
         put_u32(20 + p * 2, (uint32_t)(m.irms[p] * 1000.0f + 0.5f));
         put_i32(30 + p * 2, (int32_t)(m.kw[p] * 1000.0f));
-        regs[40 + p] = (uint16_t)(int16_t)(m.pf[p] * 1000.0f);
+        put_i32(36 + p * 2, (int32_t)(m.kvar[p] * 1000.0f));
+        put_i32(42 + p * 2, (int32_t)(m.kva[p] * 1000.0f));
+        regs[48 + p] = (uint16_t)(int16_t)(m.pf[p] * 1000.0f);
+        put_u32(60 + p * 2, (uint32_t)(m.kwh[p] * 1000.0f + 0.5f));
     }
-    for (int i = 0; i < 4; i++) put_u32(50 + i * 2, m.pulse[i]);
+    regs[70] = (uint16_t)(m.freq_hz * 100.0f + 0.5f);
+    for (int i = 0; i < 4; i++) put_u32(80 + i * 2, m.pulse[i]);
     for (int i = 0; i < 8; i++) {
         put_i32(100 + i * 2, m.adc1[i]);
         put_i32(120 + i * 2, m.adc2[i]);
@@ -152,7 +156,6 @@ static void rtu_tx(uart_port_t uart, int de, const uint8_t *frame, int len)
     if (de >= 0) gpio_set_level(de, 0);
 }
 
-#if PP_ENABLE_MODBUS_SLAVE
 /* ---------- UART1: Modbus RTU Slave ---------- */
 static void task_modbus_slave(void *arg)
 {
@@ -196,7 +199,6 @@ static void task_modbus_slave(void *arg)
         len = 0;
     }
 }
-#endif
 
 /* ---------- Modbus TCP Slave (port 502) ---------- */
 #if PP_ENABLE_MODBUS_TCP
@@ -308,7 +310,6 @@ static void task_modbus_tcp(void *arg)
 }
 #endif
 
-#if PP_ENABLE_MODBUS_MASTER
 /* ---------- UART2: Modbus RTU Master ---------- */
 /* Poll one or more downstream devices. Results stored starting at reg 202. */
 
@@ -404,7 +405,6 @@ static void task_modbus_master(void *arg)
         vTaskDelay(pdMS_TO_TICKS(MASTER_POLL_INTERVAL_MS));
     }
 }
-#endif
 
 /* ---------- Public start ---------- */
 void modbus_start(uart_port_t slave_uart, int slave_de_pin,
@@ -417,13 +417,9 @@ void modbus_start(uart_port_t slave_uart, int slave_de_pin,
     s_master_de = master_de_pin;
     s_meas_fn = meas_fn;
 
-#if PP_ENABLE_MODBUS_SLAVE
     xTaskCreate(task_modbus_slave, "mb_slave", 4096, NULL, 6, NULL);
-#endif
 #if PP_ENABLE_MODBUS_TCP
     xTaskCreate(task_modbus_tcp, "mb_tcp", 6144, NULL, 5, NULL);
 #endif
-#if PP_ENABLE_MODBUS_MASTER
     xTaskCreate(task_modbus_master, "mb_master", 4096, NULL, 4, NULL);
-#endif
 }

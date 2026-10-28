@@ -172,13 +172,17 @@ static volatile uint32_t power_wr = 0;
 typedef struct {
     float vrms;
     float irms;
-    float kw;
+    float kw;       // active power
+    float kvar;     // reactive power
+    float kva;      // apparent power
     float pf;
+    float kwh;      // energy accumulator
     uint32_t n;
 } power_phase_t;
 
 static power_phase_t power_result[POWER_PHASES];
 static uint32_t power_sps_meas = 0;
+static float freq_hz = 0.0f;   // estimated from phase 1 voltage zero-crossing
 
 static volatile bool adc_paused = false;
 
@@ -455,6 +459,9 @@ static void task_power_calc(void *arg)
             double sum_v2[POWER_PHASES] = {0};
             double sum_i2[POWER_PHASES] = {0};
             double sum_p[POWER_PHASES] = {0};
+            int zc_count = 0;
+            int32_t prev_v = 0;
+            bool first = true;
 
             for (uint32_t k = now - n; k < now; k++) {
                 const power_sample_t *s = &power_ring[k % POWER_RING_SIZE];
@@ -465,17 +472,39 @@ static void task_power_calc(void *arg)
                     sum_i2[p] += i * i;
                     sum_p[p] += v * i;
                 }
+                // Zero-crossing on phase 1 voltage for frequency
+                int32_t v1 = s->v[0];
+                if (!first && prev_v < 0 && v1 >= 0) zc_count++;
+                prev_v = v1;
+                first = false;
             }
+
+            float dt_sec = (float)PP_POWER_WINDOW_MS / 1000.0f;
+            if (zc_count >= 1 && dt_sec > 0) {
+                freq_hz = (float)zc_count / dt_sec;
+            }
+
             for (int p = 0; p < POWER_PHASES; p++) {
                 float vrms = sqrtf((float)(sum_v2[p] / n));
                 float irms = sqrtf((float)(sum_i2[p] / n));
                 float p_w  = (float)(sum_p[p] / n);
                 float s_va = vrms * irms;
+                float q_var = 0.0f;
+                if (s_va > fabsf(p_w)) {
+                    q_var = sqrtf(s_va * s_va - p_w * p_w);
+                    // Sign from lagging assumption (positive Q for inductive)
+                    // Refine later with phase if needed
+                }
                 power_result[p].vrms = vrms;
                 power_result[p].irms = irms;
                 power_result[p].kw   = p_w / 1000.0f;
+                power_result[p].kvar = q_var / 1000.0f;
+                power_result[p].kva  = s_va / 1000.0f;
                 power_result[p].pf   = (s_va > 1e-6f) ? (p_w / s_va) : 0.0f;
                 power_result[p].n    = n;
+
+                // Energy integration: kWh += kW * dt_hours
+                power_result[p].kwh += power_result[p].kw * (dt_sec / 3600.0f);
             }
         }
         last_wr = now;
@@ -514,6 +543,16 @@ void ads131m08_get_power(float vrms[3], float irms[3], float kw[3], float pf[3],
         if (pf)   pf[p]   = power_result[p].pf;
     }
     if (sps) *sps = power_sps_meas;
+}
+
+void ads131m08_get_power_ext(float kvar[3], float kva[3], float kwh[3], float *freq)
+{
+    for (int p = 0; p < 3; p++) {
+        if (kvar) kvar[p] = power_result[p].kvar;
+        if (kva)  kva[p]  = power_result[p].kva;
+        if (kwh)  kwh[p]  = power_result[p].kwh;
+    }
+    if (freq) *freq = freq_hz;
 }
 
 const char *ads131m08_ch_name_adc1(int ch)

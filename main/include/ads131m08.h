@@ -47,6 +47,7 @@ void ads131m08_calibrate_measure(uint16_t samples);
 // Getters for web / modbus
 void ads131m08_get_avg(int32_t adc1[ADS131M08_NUM_CH], int32_t adc2[ADS131M08_NUM_CH]);
 void ads131m08_get_power(float vrms[3], float irms[3], float kw[3], float pf[3], uint32_t *sps);
+void ads131m08_get_power_ext(float kvar[3], float kva[3], float kwh[3], float *freq);
 
 const char *ads131m08_ch_name_adc1(int ch);
 const char *ads131m08_ch_name_adc2(int ch);

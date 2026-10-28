@@ -31,12 +31,20 @@ static void rtu_modbus_snapshot(modbus_meas_t *out)
 
     float vrms[3], irms[3], kw[3], pf[3];
     ads131m08_get_power(vrms, irms, kw, pf, NULL);
+
+    float kvar[3], kva[3], kwh[3], freq;
+    ads131m08_get_power_ext(kvar, kva, kwh, &freq);
+
     for (int p = 0; p < 3; p++) {
         out->vrms[p] = vrms[p];
         out->irms[p] = irms[p];
         out->kw[p]   = kw[p];
+        out->kvar[p] = kvar[p];
+        out->kva[p]  = kva[p];
         out->pf[p]   = pf[p];
+        out->kwh[p]  = kwh[p];
     }
+    out->freq_hz = freq;
 
     pulse_get_counts(out->pulse);
 

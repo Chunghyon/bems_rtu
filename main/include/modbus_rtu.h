@@ -19,13 +19,23 @@
  * 30-31   P1 watts (int32)
  * 32-33   P2 watts
  * 34-35   P3 watts
- * 40      PF1 x1000
- * 41      PF2 x1000
- * 42      PF3 x1000
- * 50-51   pulse 1
- * 52-53   pulse 2
- * 54-55   pulse 3
- * 56-57   pulse 4
+ * 36-37   Q1 VAR (int32) reactive
+ * 38-39   Q2 VAR
+ * 40-41   Q3 VAR
+ * 42-43   S1 VA (int32) apparent
+ * 44-45   S2 VA
+ * 46-47   S3 VA
+ * 48      PF1 x1000
+ * 49      PF2 x1000
+ * 50      PF3 x1000
+ * 60-61   kWh1 x1000 (uint32)
+ * 62-63   kWh2 x1000
+ * 64-65   kWh3 x1000
+ * 70      Frequency x100 (Hz)
+ * 80-81   pulse 1
+ * 82-83   pulse 2
+ * 84-85   pulse 3
+ * 86-87   pulse 4
  * 100-115 ADC1 avg int32 x8 (2 regs each)
  * 120-135 ADC2 avg int32 x8
  * 200     master poll ok count
@@ -39,7 +49,11 @@ typedef struct {
     float vrms[3];
     float irms[3];
     float kw[3];
+    float kvar[3];
+    float kva[3];
     float pf[3];
+    float kwh[3];
+    float freq_hz;
     uint32_t pulse[4];
     int32_t adc1[8];
     int32_t adc2[8];
