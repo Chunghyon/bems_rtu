@@ -40,6 +40,7 @@
 
 #include "rtu_pins.h"
 #include "eth_w5500.h"
+#include "modbus_rtu.h"
 
 // ========== ADC Channel & PCA9555 Port Enums ==========
 // ADC1 channels (ADS131M08 #1) — names linked to schematic nets / function
@@ -220,7 +221,7 @@ static void init_pulse_inputs(void)
 static void init_rs485(uart_port_t uart_num, int tx, int rx, int de_re)
 {
     uart_config_t uart_config = {
-        .baud_rate = 9600,
+        .baud_rate = MODBUS_BAUD,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
@@ -230,12 +231,13 @@ static void init_rs485(uart_port_t uart_num, int tx, int rx, int de_re)
     uart_driver_install(uart_num, 1024, 1024, 0, NULL, 0);
     uart_param_config(uart_num, &uart_config);
     uart_set_pin(uart_num, tx, rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_set_rx_timeout(uart_num, 10);
 
     if (de_re >= 0) {
         gpio_set_direction(de_re, GPIO_MODE_OUTPUT);
         gpio_set_level(de_re, 0);
     }
-    ESP_LOGI(TAG, "RS-485 UART%d initialized", uart_num);
+    ESP_LOGI(TAG, "RS-485 UART%d initialized (%d 8N1)", uart_num, MODBUS_BAUD);
 }
 #endif
 
@@ -1250,6 +1252,24 @@ static void task_console(void *arg)
     }
 }
 
+#if PP_ENABLE_MODBUS
+static void rtu_modbus_snapshot(modbus_meas_t *out)
+{
+    if (!out) return;
+    for (int p = 0; p < 3; p++) {
+        out->vrms[p] = power_result[p].vrms;
+        out->irms[p] = power_result[p].irms;
+        out->kw[p]   = power_result[p].kw;
+        out->pf[p]   = power_result[p].pf;
+    }
+    for (int i = 0; i < 4; i++) out->pulse[i] = pulse_counts[i];
+    for (int i = 0; i < 8; i++) {
+        out->adc1[i] = adc1_avg[i];
+        out->adc2[i] = adc2_avg[i];
+    }
+}
+#endif
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "BEMS RTU starting...");
@@ -1301,6 +1321,13 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
 #else
     ESP_LOGI(TAG, "Ethernet disabled (PP_ENABLE_ETHERNET=0)");
+#endif
+
+#if PP_ENABLE_RS485 && PP_ENABLE_MODBUS
+    // TCP/IP 스택 초기화 후에 시작해야 Modbus TCP socket()이 성공함
+    modbus_start(RS485_UART_NUM_1, RS485_DE_RE_PIN_1,
+                 RS485_UART_NUM_2, RS485_DE_RE_PIN_2,
+                 rtu_modbus_snapshot);
 #endif
 
 #if PP_ENABLE_ADS131M08
