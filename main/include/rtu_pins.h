@@ -18,15 +18,20 @@
 
 #define PP_ENABLE_ETHERNET		1
 #define PP_ENABLE_ADS131M08		1
-#define PP_ENABLE_RS485			1
-#define PP_ENABLE_MODBUS		1
-#define PP_ENABLE_MODBUS_TCP	1
-#define MODBUS_SLAVE_ID			1
-#define MODBUS_BAUD				9600
-#define MODBUS_TCP_PORT			502
+
 #define PP_ENABLE_PULSE_INPUTS	1
 #define PP_ENABLE_RELAY			1
 #define PP_ENABLE_HEARTBEAT		1
+
+#define PP_ENABLE_RS485			1
+#define PP_ENABLE_MODBUS		1
+#define PP_ENABLE_MODBUS_TCP	1
+#define PP_ENABLE_MODBUS_MASTER	0
+#define PP_ENABLE_MODBUS_SLAVE	1
+
+#define MODBUS_SLAVE_ID			1
+#define MODBUS_BAUD				9600
+#define MODBUS_TCP_PORT			502
 
 // ADC conversion mode: 1 = use DRDY interrupt, 0 = on-demand (timed read)
 #define PP_ADC_USE_DRDY			1

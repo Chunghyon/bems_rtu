@@ -31,6 +31,7 @@
  * 200     master poll ok count
  * 201     master poll fail count
  * 202-211 last master FC03 payload (10 regs)
+ * 220-229 second master payload (optional)
  */
 #define MODBUS_REG_COUNT  256
 
