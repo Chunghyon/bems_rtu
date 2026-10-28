@@ -143,10 +143,43 @@ static const char * const pca_port_names[PCA_PORT_COUNT] = {
 
 static const char *TAG = "RTU_MAIN";
 
+static void init_leds_gpio(void)
+{
+    gpio_reset_pin(ETH_SPI_CS);
+    gpio_reset_pin(ETH_RST_PIN);
+    gpio_reset_pin(ETH_INT_PIN);
+    gpio_set_direction(ETH_SPI_CS, GPIO_MODE_OUTPUT);
+    gpio_set_direction(ETH_RST_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(ETH_SPI_CS, 1);
+    gpio_set_level(ETH_RST_PIN, 1);
+
+    gpio_reset_pin(ADC_SYNC_PIN);
+    gpio_reset_pin(ADC_DRDY_PIN);
+
+    gpio_reset_pin(ADC1_SPI_CS);
+    gpio_reset_pin(ADC2_SPI_CS);
+    gpio_set_direction(ADC1_SPI_CS, GPIO_MODE_OUTPUT);
+    gpio_set_direction(ADC2_SPI_CS, GPIO_MODE_OUTPUT);
+    gpio_set_level(ADC1_SPI_CS, 1);
+    gpio_set_level(ADC2_SPI_CS, 1);
+
+    gpio_reset_pin(LED_STATUS_GREEN);
+    gpio_reset_pin(LED_STATUS_RED);
+
+    gpio_set_direction(LED_STATUS_GREEN, GPIO_MODE_OUTPUT);
+    gpio_set_direction(LED_STATUS_RED, GPIO_MODE_OUTPUT);
+    gpio_set_level(LED_STATUS_GREEN, 1);
+    gpio_set_level(LED_STATUS_RED, 0);
+}
+
+#if PP_ENABLE_ETHERNET
 static esp_eth_handle_t g_eth_handle = NULL;
 static esp_netif_t *g_eth_netif = NULL;
 static esp_eth_netif_glue_handle_t g_eth_glue = NULL;
 static void start_webserver(void);
+#endif
+
+#if PP_ENABLE_PULSE_INPUTS
 // ========== Pulse counters ==========
 static volatile uint32_t pulse_counts[4] = {0};
 static uint32_t pulse_last_edge_time[4] = {0};
@@ -181,8 +214,9 @@ static void init_pulse_inputs(void)
 
     ESP_LOGI(TAG, "Pulse inputs initialized");
 }
+#endif
 
-// ========== RS-485 ==========
+#if PP_ENABLE_RS485
 static void init_rs485(uart_port_t uart_num, int tx, int rx, int de_re)
 {
     uart_config_t uart_config = {
@@ -203,7 +237,11 @@ static void init_rs485(uart_port_t uart_num, int tx, int rx, int de_re)
     }
     ESP_LOGI(TAG, "RS-485 UART%d initialized", uart_num);
 }
+#endif
 
+#if PP_ENABLE_ADS131M08
+#define ADS131M08_NUM_CH    8
+bool adc_log_enabled = false;
 // Note: DRDY is shared on schematic but net to ADC2 was cut.
 // Only ADC1 DRDY (ADC_DRDY_PIN) is used.
 static spi_device_handle_t adc1_spi = NULL;
@@ -324,10 +362,6 @@ static uint16_t ads131m08_osr_to_clock(uint16_t osr, bool channels_on)
     return val;
 }
 
-
-#define ADS131M08_NUM_CH    8
-
-static void IRAM_ATTR drdy_isr_handler(void *arg);
 // Per-channel offset (subtracted from every sample). Filled by ads131m08_calibrate().
 static int32_t adc1_offset[ADS131M08_NUM_CH] = {0};
 static int32_t adc2_offset[ADS131M08_NUM_CH] = {0};
@@ -370,6 +404,15 @@ typedef struct {
 
 static power_phase_t power_result[POWER_PHASES];
 static uint32_t power_sps_meas = 0;
+
+static void IRAM_ATTR drdy_isr_handler(void *arg)
+{
+    BaseType_t hp_task_woken = pdFALSE;
+    xSemaphoreGiveFromISR(drdy_sem, &hp_task_woken);
+    if (hp_task_woken) {
+        portYIELD_FROM_ISR();
+    }
+}
 
 static void init_ads131m08(void)
 {
@@ -549,47 +592,6 @@ static void ads131m08_calibrate_measure(uint16_t samples)
              adc2_offset[0], adc2_offset[1], adc2_offset[2], adc2_offset[3]);
 }
 
-static void IRAM_ATTR drdy_isr_handler(void *arg)
-{
-    BaseType_t hp_task_woken = pdFALSE;
-    xSemaphoreGiveFromISR(drdy_sem, &hp_task_woken);
-    if (hp_task_woken) {
-        portYIELD_FROM_ISR();
-    }
-}
-
-bool adc_log_enabled = false;
-bool web_update_enabled = false;
-int web_update_period_sec = 5;   // seconds (1~300)
-
-// ---------- NVS persistence for web update period ----------
-#define NVS_NAMESPACE   "rtu_cfg"
-#define NVS_KEY_PERIOD  "web_period"
-
-static void nvs_save_web_period(int period)
-{
-    nvs_handle_t handle;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
-        nvs_set_i32(handle, NVS_KEY_PERIOD, period);
-        nvs_commit(handle);
-        nvs_close(handle);
-    }
-}
-
-static void nvs_load_web_period(void)
-{
-    nvs_handle_t handle;
-    int32_t val = 0;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
-        if (nvs_get_i32(handle, NVS_KEY_PERIOD, &val) == ESP_OK) {
-            if (val >= 1 && val <= 300) {
-                web_update_period_sec = (int)val;
-                ESP_LOGI(TAG, "Loaded web update period from NVS: %d s", web_update_period_sec);
-            }
-        }
-        nvs_close(handle);
-    }
-}
 static void task_ads131m08(void *arg)
 {
     int32_t channels[ADS131M08_NUM_CH];
@@ -745,11 +747,45 @@ static void task_power_calc(void *arg)
         }
     }
 }
+#endif
+
+#if PP_ENABLE_ETHERNET
+bool web_update_enabled = false;
+int web_update_period_sec = 5;   // seconds (1~300)
+
+// ---------- NVS persistence for web update period ----------
+#define NVS_NAMESPACE   "rtu_cfg"
+#define NVS_KEY_PERIOD  "web_period"
+
+static void nvs_save_web_period(int period)
+{
+    nvs_handle_t handle;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+        nvs_set_i32(handle, NVS_KEY_PERIOD, period);
+        nvs_commit(handle);
+        nvs_close(handle);
+    }
+}
+
+static void nvs_load_web_period(void)
+{
+    nvs_handle_t handle;
+    int32_t val = 0;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        if (nvs_get_i32(handle, NVS_KEY_PERIOD, &val) == ESP_OK) {
+            if (val >= 1 && val <= 300) {
+                web_update_period_sec = (int)val;
+                ESP_LOGI(TAG, "Loaded web update period from NVS: %d s", web_update_period_sec);
+            }
+        }
+        nvs_close(handle);
+    }
+}
 
 // ========== W5500 Ethernet ==========
 static httpd_handle_t web_server = NULL;
 
-static void stop_webserver(void)
+void stop_webserver(void)
 {
     if (web_server) {
         httpd_stop(web_server);
@@ -803,6 +839,7 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
 
     start_webserver();
 }
+#endif
 
 static void init_spi2_host(void)
 {
@@ -819,6 +856,7 @@ static void init_spi2_host(void)
              ADC_SPI_MOSI, ADC_SPI_MISO, ADC_SPI_CLK);
 }
 
+#if PP_ENABLE_ETHERNET
 // ========== Simple Web Server ==========
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
@@ -917,7 +955,9 @@ static void start_webserver(void)
         web_server = NULL;
     }
 }
+#endif
 
+#if PP_ENABLE_PULSE_INPUTS
 // ========== Periodic task ==========
 static void task_pulse_data_collection(void *arg)
 {
@@ -929,7 +969,9 @@ static void task_pulse_data_collection(void *arg)
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }
+#endif
 
+#if PP_ENABLE_RELAY
 // ========== I2C / PCA9555PWR (Relay control) ==========
 // Address: base 0x20 + (A2<<2 | A1<<1 | A0) = 0x20 + 0x01 = 0x21
 #define PCA9555_ADDR            0x21
@@ -1010,31 +1052,16 @@ static void task_relay_test(void *arg)
     }
 }
 
-// ========== Console command handlers ==========
-static void cmd_relay_toggle(void)
-{
-    relay_test_enabled = !relay_test_enabled;
-    ESP_LOGI(TAG, "Relay test %s", relay_test_enabled ? "ENABLED" : "DISABLED");
-    if (!relay_test_enabled) {
-        pca9555_write_reg(PCA9555_REG_OUTPUT0, 0x00);
-        pca9555_write_reg(PCA9555_REG_OUTPUT1, 0x00);
-    }
-}
+#endif
 
 static void cmd_dummy_1(void)
 {
     ESP_LOGI(TAG, "[DUMMY1] Test command 1 executed");
-    static bool toggle = false;
-    pca9555_write_reg(PCA9555_REG_OUTPUT0, toggle ? 0x55 : 0xAA);
-    toggle = !toggle;
 }
 
 static void cmd_dummy_2(void)
 {
     ESP_LOGI(TAG, "[DUMMY2] Test command 2 executed");
-    static bool toggle = false;
-    pca9555_write_reg(PCA9555_REG_OUTPUT1, toggle ? 0x55 : 0xAA);
-    toggle = !toggle;
 }
 
 static void cmd_dummy_3(void)
@@ -1042,6 +1069,7 @@ static void cmd_dummy_3(void)
     ESP_LOGI(TAG, "[DUMMY3] Test command 3 executed");
 }
 
+#if PP_ENABLE_ETHERNET
 static void eth_full_recover(void)
 {
     if (!g_eth_handle) {
@@ -1083,15 +1111,32 @@ static void eth_full_recover(void)
     ESP_LOGI(TAG, "Full recover done. Wait for Link Up / IP...");
 }
 
+static esp_err_t cc_tcpip_stack_init(esp_eth_handle_t eth_handle)
+{
+    // Initialize TCP/IP network interface (should be called only once in application)
+    ESP_ERROR_CHECK(esp_netif_init());
+    // Create default event loop that running in background
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
+    g_eth_netif = esp_netif_new(&cfg);
+    g_eth_glue = esp_eth_new_netif_glue(eth_handle);
+    ESP_ERROR_CHECK(esp_netif_attach(g_eth_netif, g_eth_glue));
+
+    return ESP_OK;
+}
+#endif
+
+#if PP_ENABLE_HEARTBEAT
 static void task_heartbeat(void *arg)
 {
     uint32_t sec = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
         sec += 10;
-        //ESP_LOGI(TAG, "[HB] uptime %lu s", (unsigned long)sec);
     }
 }
+#endif
 
 static void task_console(void *arg)
 {
@@ -1204,49 +1249,6 @@ static void task_console(void *arg)
         }
     }
 }
-static void init_leds_gpio(void)
-{
-    gpio_reset_pin(ETH_SPI_CS);
-    gpio_reset_pin(ETH_RST_PIN);
-    gpio_reset_pin(ETH_INT_PIN);
-    gpio_set_direction(ETH_SPI_CS, GPIO_MODE_OUTPUT);
-    gpio_set_direction(ETH_RST_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(ETH_SPI_CS, 1);
-    gpio_set_level(ETH_RST_PIN, 1);
-
-    gpio_reset_pin(ADC_SYNC_PIN);
-    gpio_reset_pin(ADC_DRDY_PIN);
-
-    gpio_reset_pin(ADC1_SPI_CS);
-    gpio_reset_pin(ADC2_SPI_CS);
-    gpio_set_direction(ADC1_SPI_CS, GPIO_MODE_OUTPUT);
-    gpio_set_direction(ADC2_SPI_CS, GPIO_MODE_OUTPUT);
-    gpio_set_level(ADC1_SPI_CS, 1);
-    gpio_set_level(ADC2_SPI_CS, 1);
-
-    gpio_reset_pin(LED_STATUS_GREEN);
-    gpio_reset_pin(LED_STATUS_RED);
-
-    gpio_set_direction(LED_STATUS_GREEN, GPIO_MODE_OUTPUT);
-    gpio_set_direction(LED_STATUS_RED, GPIO_MODE_OUTPUT);
-    gpio_set_level(LED_STATUS_GREEN, 1);
-    gpio_set_level(LED_STATUS_RED, 0);
-}
-
-esp_err_t cc_tcpip_stack_init(esp_eth_handle_t eth_handle)
-{
-    // Initialize TCP/IP network interface (should be called only once in application)
-    ESP_ERROR_CHECK(esp_netif_init());
-    // Create default event loop that running in background
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
-    g_eth_netif = esp_netif_new(&cfg);
-    g_eth_glue = esp_eth_new_netif_glue(eth_handle);
-    ESP_ERROR_CHECK(esp_netif_attach(g_eth_netif, g_eth_glue));
-
-    return ESP_OK;
-}
 
 void app_main(void)
 {
@@ -1262,19 +1264,26 @@ void app_main(void)
     // Load persisted settings
     nvs_load_web_period();
 
-    // Install the GPIO driver's ETS_GPIO_INTR_SOURCE ISR handler service, 
-    //  which allows per-pin GPIO interrupt handlers.
+    /* Install the GPIO driver's ETS_GPIO_INTR_SOURCE ISR handler service, 
+         which allows per-pin GPIO interrupt handlers. */
     gpio_install_isr_service(0);
 
     init_leds_gpio();
 
-    //init_i2c_pca9555();
-    //xTaskCreate(task_relay_test, "relay_test", 4096, NULL, 4, NULL);
- 
-    //init_pulse_inputs();
-    //init_rs485(RS485_UART_NUM_1, RS485_TX_PIN_1, RS485_RX_PIN_1, RS485_DE_RE_PIN_1);
-    //init_rs485(RS485_UART_NUM_2, RS485_TX_PIN_2, RS485_RX_PIN_2, RS485_DE_RE_PIN_2);
-    //xTaskCreate(task_pulse_data_collection, "pulse_collect", 4096, NULL, 5, NULL);
+#if PP_ENABLE_RELAY
+    init_i2c_pca9555();
+    xTaskCreate(task_relay_test, "relay_test", 4096, NULL, 4, NULL);
+#endif
+
+#if PP_ENABLE_PULSE_INPUTS
+    init_pulse_inputs();
+    xTaskCreate(task_pulse_data_collection, "pulse_collect", 4096, NULL, 5, NULL);
+#endif
+
+#if PP_ENABLE_RS485
+    init_rs485(RS485_UART_NUM_1, RS485_TX_PIN_1, RS485_RX_PIN_1, RS485_DE_RE_PIN_1);
+    init_rs485(RS485_UART_NUM_2, RS485_TX_PIN_2, RS485_RX_PIN_2, RS485_DE_RE_PIN_2);
+#endif
 
     init_spi2_host();
 
@@ -1294,14 +1303,16 @@ void app_main(void)
     ESP_LOGI(TAG, "Ethernet disabled (PP_ENABLE_ETHERNET=0)");
 #endif
 
-#if PP_ENABLE_ADC
+#if PP_ENABLE_ADS131M08
     init_ads131m08();
     xTaskCreate(task_ads131m08, "ads131m08", 4096, NULL, 8, NULL);
     xTaskCreate(task_power_calc, "power", 8192, NULL, 5, NULL);
  #endif
  
-    xTaskCreate(task_console, "console", 4096, NULL, 3, NULL);
+#if PP_ENABLE_HEARTBEAT
     xTaskCreate(task_heartbeat, "heartbeat", 4096, NULL, 2, NULL);
+#endif
 
+    xTaskCreate(task_console, "console", 4096, NULL, 3, NULL);
     ESP_LOGI(TAG, "RTU ready......");
 }

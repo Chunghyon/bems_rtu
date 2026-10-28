@@ -17,7 +17,11 @@
 #include "driver/uart.h"
 
 #define PP_ENABLE_ETHERNET		1
-#define PP_ENABLE_ADC			1
+#define PP_ENABLE_ADS131M08		1
+#define PP_ENABLE_RS485			1
+#define PP_ENABLE_PULSE_INPUTS	1
+#define PP_ENABLE_RELAY			1
+#define PP_ENABLE_HEARTBEAT		1
 
 // ADC conversion mode: 1 = use DRDY interrupt, 0 = on-demand (timed read)
 #define PP_ADC_USE_DRDY			1
@@ -75,7 +79,10 @@
 // ======= ADC Common(ADS131M08) ========
 #define ADC_SYNC_PIN			GPIO_NUM_3
 #define ADC_DRDY_PIN			GPIO_NUM_47   // was 46 (strapping); 47 is not a strap pin
-#define ADC_SPI_CLK_SPEED_HZ    8000000
+#define ADC_SPI_CLK_SPEED_HZ    16000000
+/* 	8 kSPS → SPI 4 MHz 이상
+	16 kSPS → SPI 8 MHz 이상
+	32 kSPS → SPI 16 MHz 이상 */
 
 // ========== ADC1(ADS131M08) ==========
 #define ADC1_SPI_CS				GPIO_NUM_10
