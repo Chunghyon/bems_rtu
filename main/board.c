@@ -1,5 +1,6 @@
+#include "project.h"
 #include "board.h"
-#include "rtu_pins.h"
+#include "modbus_rtu.h"
 
 #include "driver/gpio.h"
 #include "driver/uart.h"

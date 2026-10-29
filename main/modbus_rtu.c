@@ -1,5 +1,5 @@
+#include "project.h"
 #include "modbus_rtu.h"
-#include "rtu_pins.h"
 
 #include <string.h>
 #include <errno.h>
@@ -156,6 +156,7 @@ static void rtu_tx(uart_port_t uart, int de, const uint8_t *frame, int len)
     if (de >= 0) gpio_set_level(de, 0);
 }
 
+#if PP_ENABLE_MODBUS_SLAVE
 /* ---------- UART1: Modbus RTU Slave ---------- */
 static void task_modbus_slave(void *arg)
 {
@@ -199,10 +200,10 @@ static void task_modbus_slave(void *arg)
         len = 0;
     }
 }
+#endif
 
+#if PP_ENABLE_MODBUS_TCP_S
 /* ---------- Modbus TCP Slave (port 502) ---------- */
-#if PP_ENABLE_MODBUS_TCP
-
 /* Read exactly n bytes with timeout. Returns n on success, <0 on error. */
 static int recv_full(int fd, uint8_t *buf, int n, int timeout_ms)
 {
@@ -310,6 +311,7 @@ static void task_modbus_tcp(void *arg)
 }
 #endif
 
+#if PP_ENABLE_MODBUS_MASTER
 /* ---------- UART2: Modbus RTU Master ---------- */
 /* Poll one or more downstream devices. Results stored starting at reg 202. */
 
@@ -405,6 +407,7 @@ static void task_modbus_master(void *arg)
         vTaskDelay(pdMS_TO_TICKS(MASTER_POLL_INTERVAL_MS));
     }
 }
+#endif
 
 /* ---------- Public start ---------- */
 void modbus_start(uart_port_t slave_uart, int slave_de_pin,
@@ -417,9 +420,13 @@ void modbus_start(uart_port_t slave_uart, int slave_de_pin,
     s_master_de = master_de_pin;
     s_meas_fn = meas_fn;
 
-    xTaskCreate(task_modbus_slave, "mb_slave", 4096, NULL, 6, NULL);
-#if PP_ENABLE_MODBUS_TCP
+#if PP_ENABLE_MODBUS_TCP_S
     xTaskCreate(task_modbus_tcp, "mb_tcp", 6144, NULL, 5, NULL);
 #endif
-    xTaskCreate(task_modbus_master, "mb_master", 4096, NULL, 4, NULL);
+#if PP_ENABLE_MODBUS_SLAVE
+    xTaskCreate(task_modbus_slave, "mb_slave", 4096, NULL, 6, NULL);
+#endif
+#if PP_ENABLE_MODBUS_MASTER
+     xTaskCreate(task_modbus_master, "mb_master", 4096, NULL, 4, NULL);
+#endif
 }

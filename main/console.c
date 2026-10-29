@@ -1,8 +1,9 @@
+#include "project.h"
+#include "board.h"
 #include "console.h"
 #include "ads131m08.h"
 #include "webserver.h"
 #include "eth_app.h"
-#include "rtu_pins.h"
 
 #include <stdio.h>
 #include <stdlib.h>

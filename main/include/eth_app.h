@@ -1,7 +1,7 @@
 #pragma once
 
 #include "esp_eth.h"
-#include "rtu_pins.h"
+#include "project.h"
 
 #ifdef __cplusplus
 extern "C" {

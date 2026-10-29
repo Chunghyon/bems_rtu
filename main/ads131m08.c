@@ -1,5 +1,6 @@
+#include "project.h"
+#include "board.h"
 #include "ads131m08.h"
-#include "rtu_pins.h"
 
 #include <string.h>
 #include <math.h>

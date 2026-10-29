@@ -11,7 +11,7 @@
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 
-#include "rtu_pins.h"
+#include "project.h"
 #include "board.h"
 #include "eth_w5500.h"
 #include "eth_app.h"

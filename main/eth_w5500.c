@@ -1,4 +1,5 @@
-#include "rtu_pins.h"
+#include "project.h"
+#include "board.h"
 #include "eth_w5500.h"
 #include "esp_log.h"
 #include "esp_check.h"

@@ -1,3 +1,4 @@
+#include "board.h"
 #include "pulse.h"
 #include "ads131m08.h"
 

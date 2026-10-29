@@ -5,7 +5,22 @@
  */
 #pragma once
 
+#include "project.h"
 #include "esp_eth_driver.h"
+
+#if PP_ETH_USE_SPI3
+#define ETH_SPI_HOST			SPI3_HOST
+#define ETH_SPI_MOSI			SPI3_MOSI
+#define ETH_SPI_MISO			SPI3_MISO
+#define ETH_SPI_CLK				SPI3_CLK
+#else
+#define ETH_SPI_HOST			SPI2_HOST
+#define ETH_SPI_MOSI			SPI2_MOSI
+#define ETH_SPI_MISO			SPI2_MISO
+#define ETH_SPI_CLK				SPI2_CLK
+#endif
+
+#define ETH_SPI_CLK_SPEED_HZ	16000000  // 16 MHz for W5500, can be adjusted
 
 #ifdef __cplusplus
 extern "C" {

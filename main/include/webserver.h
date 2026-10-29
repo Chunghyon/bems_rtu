@@ -1,7 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
-#include "rtu_pins.h"
+#include "project.h"
 
 #ifdef __cplusplus
 extern "C" {

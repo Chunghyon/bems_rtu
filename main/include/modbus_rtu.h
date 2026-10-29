@@ -43,7 +43,14 @@
  * 202-211 last master FC03 payload (10 regs)
  * 220-229 second master payload (optional)
  */
-#define MODBUS_REG_COUNT  256
+
+#define RS485_UART_NUM_1        UART_NUM_1
+#define RS485_UART_NUM_2        UART_NUM_2
+
+#define MODBUS_SLAVE_ID			1
+#define MODBUS_BAUD				9600
+#define MODBUS_TCP_PORT			502
+#define MODBUS_REG_COUNT        256
 
 typedef struct {
     float vrms[3];
