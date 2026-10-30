@@ -29,6 +29,7 @@ static void print_console_help(void)
     ESP_LOGI(TAG, "  k/K : config common channel (c/v/d, NVS)");
     ESP_LOGI(TAG, "  i/I : set current source channels (0-15, NVS)");
     ESP_LOGI(TAG, "  v/V : set voltage source channels (0-15, NVS)");
+    ESP_LOGI(TAG, "  r/R : relay control test (1~16  0=NO 1=NC)");
     ESP_LOGI(TAG, "  /   : show this help");
     ESP_LOGI(TAG, "========================");
 }
@@ -230,6 +231,21 @@ static void task_console(void *arg)
                 }
                 break;
             }
+            case 'r':
+            case 'R': {
+                ESP_LOGI(TAG, "Relay control test. Enter '<1~16> <0|1>' or ESC to cancel");
+                ESP_LOGI(TAG, "  1~16 = relay number,  0=NO (off),  1=NC (on)");
+                char buf[16] = {0};
+                if (!read_line_esc(buf, sizeof(buf))) break;
+                int relay = 0, state = 0;
+                if (sscanf(buf, "%d %d", &relay, &state) == 2 && relay >= 1 && relay <= 16 && (state == 0 || state == 1)) {
+                    pca9555_set_pin((pca9555_port_t)(relay - 1), state);
+                    ESP_LOGI(TAG, "Relay %d set to %s", relay, state ? "NC (on)" : "NO (off)");
+                } else {
+                    ESP_LOGI(TAG, "Invalid input. Format: <1~16> <0|1>");
+                }
+                break;
+            }
             case '/':
                 print_console_help();
                 break;
@@ -237,7 +253,7 @@ static void task_console(void *arg)
             case '\r':
                 break;
             default:
-                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use a,w,p,c,m,z,k,i,v or / for help", c, c);
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use a,w,p,c,m,z,k,i,v,r or / for help", c, c);
                 break;
         }
     }
