@@ -74,6 +74,12 @@ typedef enum {
     ADC2_CH_COUNT
 } adc2_channel_t;
 
+// Phase mode for power calculation
+typedef enum {
+    POWER_MODE_SINGLE = 1,   // use only phase 0 (V1/I1)
+    POWER_MODE_THREE  = 3    // use all 3 phases
+} power_phase_mode_t;
+
 extern bool adc_log_enabled;
 
 void ads131m08_init(void);
@@ -82,7 +88,12 @@ void ads131m08_start_tasks(void);
 // Manual calibration of measurement channels (call when inputs are at zero)
 void ads131m08_calibrate_measure(uint16_t samples);
 
+// Phase mode control (default: POWER_MODE_THREE)
+void ads131m08_set_phase_mode(power_phase_mode_t mode);
+power_phase_mode_t ads131m08_get_phase_mode(void);
+
 // Getters for web / modbus
+// In SINGLE mode, only index [0] is valid; [1] and [2] are zeroed.
 void ads131m08_get_avg(int32_t adc1[ADS131M08_NUM_CH], int32_t adc2[ADS131M08_NUM_CH]);
 void ads131m08_get_power(float vrms[3], float irms[3], float kw[3], float pf[3], uint32_t *sps);
 void ads131m08_get_power_ext(float kvar[3], float kva[3], float kwh[3], float *freq);
