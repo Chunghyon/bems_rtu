@@ -16,7 +16,7 @@ static const char *TAG = "pca9555";
 #define PCA9555_REG_CONFIG0     0x06
 #define PCA9555_REG_CONFIG1     0x07
 
-static const char * const pca_port_names[PCA_PORT_COUNT] = {
+const char * const pca_port_names[PCA_PORT_COUNT] = {
     "PCA_P0.0 (10V_SEL1)",
     "PCA_P0.1 (10V_SEL2)",
     "PCA_P0.2 (10V_SEL3)",
@@ -137,40 +137,4 @@ void pca9555_config_common(common_sel_t common_sel, di_sel_t di_sel, cv_sel_t cv
     // 10V_SEL: 0 = 49.9k, 1 = 99.8k
     pca9555_set_pin(v_port, (int)r_sel);
 
-}
-
-static volatile bool relay_test_enabled = false;
-
-static void task_relay_test(void *arg)
-{
-    uint8_t relay = 0;
-    while (1) {
-        if (!relay_test_enabled) {
-            pca9555_deselect_all();
-            vTaskDelay(pdMS_TO_TICKS(200));
-            continue;
-        }
-
-        uint8_t port0 = 0, port1 = 0;
-        if (relay < 8) {
-            port0 = (1 << relay);
-        } else {
-            port1 = (1 << (relay - 8));
-        }
-
-        port0_cache = port0;
-        port1_cache = port1;
-        pca9555_flush_outputs();
-
-        ESP_LOGI(TAG, "Relay %d (%s) ON (port0=0x%02X port1=0x%02X)",
-                 relay, pca_port_names[relay], port0, port1);
-
-        relay = (relay + 1) % 16;
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
-
-void pca9555_start_task(void)
-{
-    xTaskCreate(task_relay_test, "relay_test", 4096, NULL, 4, NULL);
 }

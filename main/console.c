@@ -27,12 +27,12 @@ static void print_console_help(void)
     ESP_LOGI(TAG, "  c/C : manual ADC calibration");
     ESP_LOGI(TAG, "  m/M : set phase mode (1=single, 3=three, NVS)");
     ESP_LOGI(TAG, "  k/K : config common channel (c/v/d, NVS)");
-    ESP_LOGI(TAG, "  j/J : set current source channels (0-15, NVS)");
+    ESP_LOGI(TAG, "  i/I : set current source channels (0-15, NVS)");
+    ESP_LOGI(TAG, "  v/V : set voltage source channels (0-15, NVS)");
     ESP_LOGI(TAG, "  /   : show this help");
     ESP_LOGI(TAG, "========================");
 }
 
-// Read a line with ESC cancel. Returns false if cancelled.
 static bool read_line_esc(char *buf, int buflen)
 {
     int idx = 0;
@@ -44,7 +44,7 @@ static bool read_line_esc(char *buf, int buflen)
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        if (ch == 0x1B) {  // ESC
+        if (ch == 0x1B) {
             putchar('\n');
             fflush(stdout);
             ESP_LOGI(TAG, "Cancelled");
@@ -141,8 +141,28 @@ static void task_console(void *arg)
                 break;
             case 'k':
             case 'K': {
-                ESP_LOGI(TAG, "Common channel config. Current settings are restored from NVS at boot.");
-                ESP_LOGI(TAG, "Enter '<1-6> <c|v|d>' or ESC to cancel  (c=current, v=voltage, d=DI)");
+                ESP_LOGI(TAG, "=== Common Channel Settings ===");
+                nvs_handle_t h;
+                if (nvs_open("rtu_cfg", NVS_READONLY, &h) == ESP_OK) {
+                    for (int c = 1; c <= 6; c++) {
+                        char key[8];
+                        snprintf(key, sizeof(key), "cm%d", c);
+                        uint8_t val = 0;
+                        const char *desc = "(not set)";
+                        if (nvs_get_u8(h, key, &val) == ESP_OK) {
+                            di_sel_t di = (di_sel_t)((val >> 4) & 0xF);
+                            cv_sel_t cv = (cv_sel_t)(val & 0xF);
+                            if (di == DI_SEL_DIGITAL) desc = "DI";
+                            else if (cv == CV_SEL_VOLTAGE) desc = "VOLTAGE";
+                            else desc = "CURRENT";
+                        }
+                        ESP_LOGI(TAG, "  common%d : %s", c, desc);
+                    }
+                    nvs_close(h);
+                } else {
+                    ESP_LOGI(TAG, "  (no NVS data)");
+                }
+                ESP_LOGI(TAG, "Enter '<1-6> <c|v|d>' or ESC to cancel");
                 char buf[16] = {0};
                 if (!read_line_esc(buf, sizeof(buf))) break;
                 int common = 0;
@@ -161,7 +181,6 @@ static void task_console(void *arg)
                         break;
                     }
                     pca9555_config_common((common_sel_t)common, di, cv, R_SEL_49K9);
-                    nvs_handle_t h;
                     if (nvs_open("rtu_cfg", NVS_READWRITE, &h) == ESP_OK) {
                         char key[8];
                         snprintf(key, sizeof(key), "cm%d", common);
@@ -177,18 +196,35 @@ static void task_console(void *arg)
                 }
                 break;
             }
-            case 'j':
-            case 'J': {
-                current_source_mode_t mode = ads131m08_get_current_source();
-                ESP_LOGI(TAG, "Current source mode: %s", (mode == CURRENT_SRC_ADC1_CH0_2) ? "ADC1_CH0-2" : "CUSTOM");
+            case 'i':
+            case 'I': {
+                int c0, c1, c2;
+                ads131m08_get_current_channels(&c0, &c1, &c2);
+                ESP_LOGI(TAG, "Current source channels: %d, %d, %d", c0, c1, c2);
                 ESP_LOGI(TAG, "Enter 3 channel codes (0-7=ADC1, 8-15=ADC2, -1=unused) or ESC to cancel");
                 ESP_LOGI(TAG, "Example: 0 1 8");
                 char buf[32] = {0};
                 if (!read_line_esc(buf, sizeof(buf))) break;
-                int c0 = -1, c1 = -1, c2 = -1;
                 if (sscanf(buf, "%d %d %d", &c0, &c1, &c2) >= 1) {
                     ads131m08_set_current_source(CURRENT_SRC_CUSTOM, c0, c1, c2);
                     ESP_LOGI(TAG, "Current source set to channels %d, %d, %d (saved to NVS)", c0, c1, c2);
+                } else {
+                    ESP_LOGI(TAG, "Invalid input. Unchanged.");
+                }
+                break;
+            }
+            case 'v':
+            case 'V': {
+                int v0, v1, v2;
+                ads131m08_get_voltage_channels(&v0, &v1, &v2);
+                ESP_LOGI(TAG, "Voltage source channels: %d, %d, %d", v0, v1, v2);
+                ESP_LOGI(TAG, "Enter 3 channel codes (0-7=ADC1, 8-15=ADC2, -1=unused) or ESC to cancel");
+                ESP_LOGI(TAG, "Example: 3 4 5");
+                char buf[32] = {0};
+                if (!read_line_esc(buf, sizeof(buf))) break;
+                if (sscanf(buf, "%d %d %d", &v0, &v1, &v2) >= 1) {
+                    ads131m08_set_voltage_channels(v0, v1, v2);
+                    ESP_LOGI(TAG, "Voltage source set to channels %d, %d, %d (saved to NVS)", v0, v1, v2);
                 } else {
                     ESP_LOGI(TAG, "Invalid input. Unchanged.");
                 }
@@ -201,7 +237,7 @@ static void task_console(void *arg)
             case '\r':
                 break;
             default:
-                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use a,w,p,c,m,z,k,j or / for help", c, c);
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use a,w,p,c,m,z,k,i,v or / for help", c, c);
                 break;
         }
     }

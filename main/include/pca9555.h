@@ -57,7 +57,6 @@ typedef enum {
 } r_sel_t;
 
 void pca9555_init(void);
-void pca9555_start_task(void);
 
 // All select relays off (safe default)
 void pca9555_deselect_all(void);

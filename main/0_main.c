@@ -87,7 +87,6 @@ void app_main(void)
 
 #if PP_ENABLE_RELAY
     pca9555_init();
-    pca9555_start_task();
 #endif
 
 #if PP_ENABLE_PULSE_INPUTS

@@ -192,6 +192,7 @@ static power_phase_mode_t g_phase_mode = POWER_MODE_THREE;
 // Channel encoding: 0~7 = ADC1, 8~15 = ADC2
 static current_source_mode_t g_current_src_mode = CURRENT_SRC_ADC1_CH0_2;
 static int g_current_ch[POWER_PHASES] = {ADC1_AC_CURRENT1, ADC1_AC_CURRENT2, ADC1_AC_CURRENT3};
+static int g_voltage_ch[POWER_PHASES] = {ADC1_AC_VOLTAGE1, ADC1_AC_VOLTAGE2, ADC1_AC_VOLTAGE3};
 
 static float get_i_scale_for_ch(int ch_code)
 {
@@ -232,6 +233,29 @@ current_source_mode_t ads131m08_get_current_source(void)
     return g_current_src_mode;
 }
 
+void ads131m08_get_current_channels(int *ch0, int *ch1, int *ch2)
+{
+    if (ch0) *ch0 = g_current_ch[0];
+    if (ch1) *ch1 = g_current_ch[1];
+    if (ch2) *ch2 = g_current_ch[2];
+}
+
+void ads131m08_set_voltage_channels(int ch_phase0, int ch_phase1, int ch_phase2)
+{
+    g_voltage_ch[0] = ch_phase0;
+    g_voltage_ch[1] = ch_phase1;
+    g_voltage_ch[2] = ch_phase2;
+    ESP_LOGI(TAG, "Voltage channels set to %d, %d, %d", ch_phase0, ch_phase1, ch_phase2);
+    ads131m08_nvs_save();
+}
+
+void ads131m08_get_voltage_channels(int *ch0, int *ch1, int *ch2)
+{
+    if (ch0) *ch0 = g_voltage_ch[0];
+    if (ch1) *ch1 = g_voltage_ch[1];
+    if (ch2) *ch2 = g_voltage_ch[2];
+}
+
 // ---- NVS persistence ----
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -243,10 +267,11 @@ void ads131m08_nvs_save(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS_RTU, NVS_READWRITE, &h) != ESP_OK) return;
-    int32_t blob[5] = {
+    int32_t blob[8] = {
         (int32_t)g_current_src_mode,
         g_current_ch[0], g_current_ch[1], g_current_ch[2],
-        (int32_t)g_phase_mode
+        (int32_t)g_phase_mode,
+        g_voltage_ch[0], g_voltage_ch[1], g_voltage_ch[2]
     };
     nvs_set_blob(h, NVS_KEY_CSRC, blob, sizeof(blob));
     nvs_commit(h);
@@ -257,9 +282,9 @@ void ads131m08_nvs_load(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS_RTU, NVS_READONLY, &h) != ESP_OK) return;
-    int32_t blob[5] = {0};
+    int32_t blob[8] = {0};
     size_t len = sizeof(blob);
-    if (nvs_get_blob(h, NVS_KEY_CSRC, blob, &len) == ESP_OK && (len == sizeof(blob) || len == 16)) {
+    if (nvs_get_blob(h, NVS_KEY_CSRC, blob, &len) == ESP_OK && len >= 16) {
         g_current_src_mode = (current_source_mode_t)blob[0];
         g_current_ch[0] = blob[1];
         g_current_ch[1] = blob[2];
@@ -268,8 +293,14 @@ void ads131m08_nvs_load(void)
             power_phase_mode_t pm = (power_phase_mode_t)blob[4];
             if (pm == POWER_MODE_SINGLE || pm == POWER_MODE_THREE) g_phase_mode = pm;
         }
-        ESP_LOGI(TAG, "Loaded from NVS: cur_src mode=%d ch=%d,%d,%d  phase=%s",
+        if (len >= 32) {
+            g_voltage_ch[0] = blob[5];
+            g_voltage_ch[1] = blob[6];
+            g_voltage_ch[2] = blob[7];
+        }
+        ESP_LOGI(TAG, "Loaded from NVS: cur_src mode=%d ch=%d,%d,%d  volt_ch=%d,%d,%d  phase=%s",
                  g_current_src_mode, g_current_ch[0], g_current_ch[1], g_current_ch[2],
+                 g_voltage_ch[0], g_voltage_ch[1], g_voltage_ch[2],
                  (g_phase_mode == POWER_MODE_SINGLE) ? "SINGLE" : "THREE");
     }
     nvs_close(h);
@@ -476,21 +507,17 @@ static void task_ads131m08(void *arg)
 
         {
             power_sample_t s = {
-                .v = {
-                    adc1_ch[ADC1_AC_VOLTAGE1],
-                    adc1_ch[ADC1_AC_VOLTAGE2],
-                    adc1_ch[ADC1_AC_VOLTAGE3],
-                },
+                .v = {0, 0, 0},
                 .i = {0, 0, 0},
             };
             for (int p = 0; p < POWER_PHASES; p++) {
-                int code = g_current_ch[p];
-                if (code < 0) continue;
-                if (code < 8) {
-                    s.i[p] = adc1_ch[code];
-                } else if (code < 16) {
-                    s.i[p] = adc2_ch[code - 8];
-                }
+                int vcode = g_voltage_ch[p];
+                if (vcode >= 0 && vcode < 8) s.v[p] = adc1_ch[vcode];
+                else if (vcode >= 8 && vcode < 16) s.v[p] = adc2_ch[vcode - 8];
+
+                int icode = g_current_ch[p];
+                if (icode >= 0 && icode < 8) s.i[p] = adc1_ch[icode];
+                else if (icode >= 8 && icode < 16) s.i[p] = adc2_ch[icode - 8];
             }
             power_ring[power_wr % POWER_RING_SIZE] = s;
             power_wr++;

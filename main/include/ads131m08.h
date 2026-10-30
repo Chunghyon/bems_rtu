@@ -121,6 +121,11 @@ power_phase_mode_t ads131m08_get_phase_mode(void);
 // Burden is auto-selected: ADC1 ch0-2 → 10Ω, otherwise → 49.9Ω (common).
 void ads131m08_set_current_source(current_source_mode_t mode, int ch_phase0, int ch_phase1, int ch_phase2);
 current_source_mode_t ads131m08_get_current_source(void);
+void ads131m08_get_current_channels(int *ch0, int *ch1, int *ch2);
+
+// Voltage source channels for power calc (same encoding: 0~7=ADC1, 8~15=ADC2)
+void ads131m08_set_voltage_channels(int ch_phase0, int ch_phase1, int ch_phase2);
+void ads131m08_get_voltage_channels(int *ch0, int *ch1, int *ch2);
 
 // NVS persistence for current source + common channel modes
 void ads131m08_nvs_load(void);
