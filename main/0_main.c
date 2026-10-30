@@ -9,7 +9,9 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "driver/gpio.h"
+#include <stdio.h>
 
 #include "project.h"
 #include "board.h"
@@ -116,6 +118,25 @@ void app_main(void)
 #endif
 
 #if PP_ENABLE_ADS131M08
+    // Restore common channel modes and current source selection from NVS
+    {
+        nvs_handle_t h;
+        if (nvs_open("rtu_cfg", NVS_READONLY, &h) == ESP_OK) {
+            for (int c = 1; c <= 6; c++) {
+                char key[8];
+                snprintf(key, sizeof(key), "cm%d", c);
+                uint8_t val = 0;
+                if (nvs_get_u8(h, key, &val) == ESP_OK) {
+                    di_sel_t di = (di_sel_t)((val >> 4) & 0xF);
+                    cv_sel_t cv = (cv_sel_t)(val & 0xF);
+                    pca9555_config_common((common_sel_t)c, di, cv, R_SEL_49K9);
+                    ESP_LOGI(TAG, "Restored common%d: di=%d cv=%d", c, di, cv);
+                }
+            }
+            nvs_close(h);
+        }
+    }
+    ads131m08_nvs_load();
     ads131m08_init();
     ads131m08_start_tasks();
 #endif

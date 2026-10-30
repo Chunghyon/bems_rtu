@@ -188,6 +188,18 @@ static float freq_hz = 0.0f;   // estimated from phase 1 voltage zero-crossing
 
 static power_phase_mode_t g_phase_mode = POWER_MODE_THREE;
 
+// Current source configuration for power calculation
+// Channel encoding: 0~7 = ADC1, 8~15 = ADC2
+static current_source_mode_t g_current_src_mode = CURRENT_SRC_ADC1_CH0_2;
+static int g_current_ch[POWER_PHASES] = {ADC1_AC_CURRENT1, ADC1_AC_CURRENT2, ADC1_AC_CURRENT3};
+
+static float get_i_scale_for_ch(int ch_code)
+{
+    // ADC1 ch0~2 (codes 0,1,2) use 10ohm; all common channels use 49.9ohm
+    if (ch_code >= 0 && ch_code <= 2) return PP_I_PER_COUNT_10OHM;
+    return PP_I_PER_COUNT_49R9;
+}
+
 void ads131m08_set_phase_mode(power_phase_mode_t mode)
 {
     if (mode == POWER_MODE_SINGLE || mode == POWER_MODE_THREE) {
@@ -202,6 +214,56 @@ power_phase_mode_t ads131m08_get_phase_mode(void)
     return g_phase_mode;
 }
 
+void ads131m08_set_current_source(current_source_mode_t mode, int ch_phase0, int ch_phase1, int ch_phase2)
+{
+    g_current_src_mode = mode;
+    g_current_ch[0] = ch_phase0;
+    g_current_ch[1] = ch_phase1;
+    g_current_ch[2] = ch_phase2;
+    ESP_LOGI(TAG, "Current source mode = %s, channels: %d, %d, %d",
+             (mode == CURRENT_SRC_ADC1_CH0_2) ? "ADC1_CH0-2" : "CUSTOM",
+             ch_phase0, ch_phase1, ch_phase2);
+    ads131m08_nvs_save();
+}
+
+current_source_mode_t ads131m08_get_current_source(void)
+{
+    return g_current_src_mode;
+}
+
+// ---- NVS persistence ----
+#include "nvs_flash.h"
+#include "nvs.h"
+
+#define NVS_NS_RTU   "rtu_cfg"
+#define NVS_KEY_CSRC "cur_src"
+
+void ads131m08_nvs_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS_RTU, NVS_READWRITE, &h) != ESP_OK) return;
+    int32_t blob[4] = { (int32_t)g_current_src_mode, g_current_ch[0], g_current_ch[1], g_current_ch[2] };
+    nvs_set_blob(h, NVS_KEY_CSRC, blob, sizeof(blob));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+void ads131m08_nvs_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS_RTU, NVS_READONLY, &h) != ESP_OK) return;
+    int32_t blob[4] = {0};
+    size_t len = sizeof(blob);
+    if (nvs_get_blob(h, NVS_KEY_CSRC, blob, &len) == ESP_OK && len == sizeof(blob)) {
+        g_current_src_mode = (current_source_mode_t)blob[0];
+        g_current_ch[0] = blob[1];
+        g_current_ch[1] = blob[2];
+        g_current_ch[2] = blob[3];
+        ESP_LOGI(TAG, "Loaded current source from NVS: mode=%d ch=%d,%d,%d",
+                 g_current_src_mode, g_current_ch[0], g_current_ch[1], g_current_ch[2]);
+    }
+    nvs_close(h);
+}
 
 static volatile bool adc_paused = false;
 
@@ -370,7 +432,6 @@ void ads131m08_init(void)
 
 static void task_ads131m08(void *arg)
 {
-    int32_t channels[ADS131M08_NUM_CH];
     uint32_t last_log_tick = xTaskGetTickCount();
 
     while (1) {
@@ -386,34 +447,43 @@ static void task_ads131m08(void *arg)
         vTaskDelay(pdMS_TO_TICKS(PP_ADC_SAMPLE_MS));
 #endif
 
-        ads131m08_read_frame(adc1_spi, ADC1_SPI_CS, channels);
+        int32_t adc1_ch[ADS131M08_NUM_CH];
+        int32_t adc2_ch[ADS131M08_NUM_CH];
+
+        ads131m08_read_frame(adc1_spi, ADC1_SPI_CS, adc1_ch);
         for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
-            adc1_sum[ch] += channels[ch];
-            adc1_latest[ch] = channels[ch];
+            adc1_sum[ch] += adc1_ch[ch];
+            adc1_latest[ch] = adc1_ch[ch];
         }
         adc1_sample_count++;
+
+        ads131m08_read_frame(adc2_spi, ADC2_SPI_CS, adc2_ch);
+        for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
+            adc2_sum[ch] += adc2_ch[ch];
+            adc2_latest[ch] = adc2_ch[ch];
+        }
+        adc2_sample_count++;
 
         {
             power_sample_t s = {
                 .v = {
-                    channels[ADC1_AC_VOLTAGE1],
-                    channels[ADC1_AC_VOLTAGE2],
-                    channels[ADC1_AC_VOLTAGE3],
+                    adc1_ch[ADC1_AC_VOLTAGE1],
+                    adc1_ch[ADC1_AC_VOLTAGE2],
+                    adc1_ch[ADC1_AC_VOLTAGE3],
                 },
-                .i = {
-                    channels[ADC1_AC_CURRENT1],
-                    channels[ADC1_AC_CURRENT2],
-                    channels[ADC1_AC_CURRENT3],
-                },
+                .i = {0, 0, 0},
             };
+            for (int p = 0; p < POWER_PHASES; p++) {
+                int code = g_current_ch[p];
+                if (code < 0) continue;
+                if (code < 8) {
+                    s.i[p] = adc1_ch[code];
+                } else if (code < 16) {
+                    s.i[p] = adc2_ch[code - 8];
+                }
+            }
             power_ring[power_wr % POWER_RING_SIZE] = s;
             power_wr++;
-        }
-
-        ads131m08_read_frame(adc2_spi, ADC2_SPI_CS, channels);
-        for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
-            adc2_sum[ch] += channels[ch];
-            adc2_latest[ch] = channels[ch];
         }
         adc2_sample_count++;
 
@@ -487,7 +557,7 @@ static void task_power_calc(void *arg)
                 const power_sample_t *s = &power_ring[k % POWER_RING_SIZE];
                 for (int p = 0; p < phases; p++) {
                     double v = (double)s->v[p] * PP_V_PER_COUNT;
-                    double i = (double)s->i[p] * PP_I_PER_COUNT;
+                    double i = (double)s->i[p] * get_i_scale_for_ch(g_current_ch[p]);
                     sum_v2[p] += v * v;
                     sum_i2[p] += i * i;
                     sum_p[p] += v * i;

@@ -35,9 +35,23 @@
 // Scale: ADC LSB (≈1.2 V / 2^23) × PT or CT ratio. Tune to the front-end.
 #define PP_ADC_LSB_V			(1.2f / 8388608.0f)
 #define PP_PT_RATIO				1.0f    // primary volts / ADC-pin volt  (tune per ZMPT / onboard)
-#define PP_CT_RATIO				1.0f    // primary amps / ADC-pin volt   (tune per CT + 10ohm PD)
+
+// Burden resistors
+#define BURDEN_ADC1_CH0_2_OHM       10.0f    // ADC1 ch0~2 fixed pull-down
+#define BURDEN_COMMON_CUR_OHM       49.9f    // common channels when CUR_SEL=0 (49.9ohm)
+
+// CT ratio: primary amps / ADC-pin volt. Tune PP_CT_RATIO_10OHM to your CT + 10ohm.
+// 49.9ohm version is derived (inverse to burden). Adjust independently if needed.
+#define PP_CT_RATIO_10OHM           1.0f
+#define PP_CT_RATIO_49R9            (PP_CT_RATIO_10OHM * BURDEN_ADC1_CH0_2_OHM / BURDEN_COMMON_CUR_OHM)
+
 #define PP_V_PER_COUNT			(PP_ADC_LSB_V * PP_PT_RATIO)
-#define PP_I_PER_COUNT			(PP_ADC_LSB_V * PP_CT_RATIO)
+#define PP_I_PER_COUNT_10OHM    (PP_ADC_LSB_V * PP_CT_RATIO_10OHM)
+#define PP_I_PER_COUNT_49R9     (PP_ADC_LSB_V * PP_CT_RATIO_49R9)
+
+// Legacy (kept for compatibility; prefer the burden-specific ones)
+#define PP_CT_RATIO				PP_CT_RATIO_10OHM
+#define PP_I_PER_COUNT			PP_I_PER_COUNT_10OHM
 
 #ifdef __cplusplus
 extern "C" {
@@ -80,6 +94,14 @@ typedef enum {
     POWER_MODE_THREE  = 3    // use all 3 phases
 } power_phase_mode_t;
 
+// Current source selection for power calculation
+// Channel encoding: 0~7 = ADC1 ch0~7, 8~15 = ADC2 ch0~7
+// When using common channels for current, configure PCA9555 CUR_SEL=0 (49.9ohm).
+typedef enum {
+    CURRENT_SRC_ADC1_CH0_2 = 0,   // use ADC1 ch0,1,2 (10 ohm burden)
+    CURRENT_SRC_CUSTOM     = 1    // use user-specified channels (burden auto-selected)
+} current_source_mode_t;
+
 extern bool adc_log_enabled;
 extern bool phase_log_enabled;
 
@@ -92,6 +114,17 @@ void ads131m08_calibrate_measure(uint16_t samples);
 // Phase mode control (default: POWER_MODE_THREE)
 void ads131m08_set_phase_mode(power_phase_mode_t mode);
 power_phase_mode_t ads131m08_get_phase_mode(void);
+
+// Current source control for power calc
+// mode: CURRENT_SRC_ADC1_CH0_2 or CURRENT_SRC_CUSTOM
+// For CUSTOM, provide channel codes: 0~7=ADC1, 8~15=ADC2. Use -1 for unused.
+// Burden is auto-selected: ADC1 ch0-2 → 10Ω, otherwise → 49.9Ω (common).
+void ads131m08_set_current_source(current_source_mode_t mode, int ch_phase0, int ch_phase1, int ch_phase2);
+current_source_mode_t ads131m08_get_current_source(void);
+
+// NVS persistence for current source + common channel modes
+void ads131m08_nvs_load(void);
+void ads131m08_nvs_save(void);
 
 // Getters for web / modbus
 // In SINGLE mode, only index [0] is valid; [1] and [2] are zeroed.
