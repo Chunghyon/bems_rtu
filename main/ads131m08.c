@@ -206,6 +206,7 @@ void ads131m08_set_phase_mode(power_phase_mode_t mode)
         g_phase_mode = mode;
         ESP_LOGI(TAG, "Power phase mode = %s",
                  (mode == POWER_MODE_SINGLE) ? "SINGLE" : "THREE");
+        ads131m08_nvs_save();
     }
 }
 
@@ -242,7 +243,11 @@ void ads131m08_nvs_save(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS_RTU, NVS_READWRITE, &h) != ESP_OK) return;
-    int32_t blob[4] = { (int32_t)g_current_src_mode, g_current_ch[0], g_current_ch[1], g_current_ch[2] };
+    int32_t blob[5] = {
+        (int32_t)g_current_src_mode,
+        g_current_ch[0], g_current_ch[1], g_current_ch[2],
+        (int32_t)g_phase_mode
+    };
     nvs_set_blob(h, NVS_KEY_CSRC, blob, sizeof(blob));
     nvs_commit(h);
     nvs_close(h);
@@ -252,15 +257,20 @@ void ads131m08_nvs_load(void)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NS_RTU, NVS_READONLY, &h) != ESP_OK) return;
-    int32_t blob[4] = {0};
+    int32_t blob[5] = {0};
     size_t len = sizeof(blob);
-    if (nvs_get_blob(h, NVS_KEY_CSRC, blob, &len) == ESP_OK && len == sizeof(blob)) {
+    if (nvs_get_blob(h, NVS_KEY_CSRC, blob, &len) == ESP_OK && (len == sizeof(blob) || len == 16)) {
         g_current_src_mode = (current_source_mode_t)blob[0];
         g_current_ch[0] = blob[1];
         g_current_ch[1] = blob[2];
         g_current_ch[2] = blob[3];
-        ESP_LOGI(TAG, "Loaded current source from NVS: mode=%d ch=%d,%d,%d",
-                 g_current_src_mode, g_current_ch[0], g_current_ch[1], g_current_ch[2]);
+        if (len >= 20) {
+            power_phase_mode_t pm = (power_phase_mode_t)blob[4];
+            if (pm == POWER_MODE_SINGLE || pm == POWER_MODE_THREE) g_phase_mode = pm;
+        }
+        ESP_LOGI(TAG, "Loaded from NVS: cur_src mode=%d ch=%d,%d,%d  phase=%s",
+                 g_current_src_mode, g_current_ch[0], g_current_ch[1], g_current_ch[2],
+                 (g_phase_mode == POWER_MODE_SINGLE) ? "SINGLE" : "THREE");
     }
     nvs_close(h);
 }

@@ -22,18 +22,55 @@ static void print_console_help(void)
     ESP_LOGI(TAG, "=== Console Commands ===");
     ESP_LOGI(TAG, "  a/A : toggle ADC log");
     ESP_LOGI(TAG, "  w/W : toggle web update");
-    ESP_LOGI(TAG, "  p/P : set web period (1~300s, NVS)");
-    ESP_LOGI(TAG, "  i/I : read ETH INT pin");
-    ESP_LOGI(TAG, "  h/H : ETH recover");
-    ESP_LOGI(TAG, "  c/C : manual ADC calibration");
-    ESP_LOGI(TAG, "  s/S : single-phase mode");
-    ESP_LOGI(TAG, "  t/T : three-phase mode");
-    ESP_LOGI(TAG, "  m/M : show phase mode");
     ESP_LOGI(TAG, "  z/Z : toggle phase log");
-    ESP_LOGI(TAG, "  k/K : config common channel (e.g. 1 c, 3 v, 5 d)  [c=current, v=voltage, d=DI]");
-    ESP_LOGI(TAG, "  j/J : set current source channels (e.g. 0 1 8)  [0-7=ADC1, 8-15=ADC2]");
+    ESP_LOGI(TAG, "  p/P : set web period (1~300s, NVS)");
+    ESP_LOGI(TAG, "  c/C : manual ADC calibration");
+    ESP_LOGI(TAG, "  m/M : set phase mode (1=single, 3=three, NVS)");
+    ESP_LOGI(TAG, "  k/K : config common channel (c/v/d, NVS)");
+    ESP_LOGI(TAG, "  j/J : set current source channels (0-15, NVS)");
     ESP_LOGI(TAG, "  /   : show this help");
     ESP_LOGI(TAG, "========================");
+}
+
+// Read a line with ESC cancel. Returns false if cancelled.
+static bool read_line_esc(char *buf, int buflen)
+{
+    int idx = 0;
+    printf("> ");
+    fflush(stdout);
+    while (1) {
+        int ch = getchar();
+        if (ch == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        if (ch == 0x1B) {  // ESC
+            putchar('\n');
+            fflush(stdout);
+            ESP_LOGI(TAG, "Cancelled");
+            return false;
+        }
+        if (ch == '\n' || ch == '\r') {
+            putchar('\n');
+            fflush(stdout);
+            buf[idx] = '\0';
+            return true;
+        }
+        if (ch == 0x08 || ch == 0x7F) {
+            if (idx > 0) {
+                idx--;
+                buf[idx] = '\0';
+                printf("\b \b");
+                fflush(stdout);
+            }
+            continue;
+        }
+        if (ch >= 32 && idx < buflen - 1) {
+            buf[idx++] = (char)ch;
+            putchar(ch);
+            fflush(stdout);
+        }
+    }
 }
 
 static void task_console(void *arg)
@@ -58,83 +95,45 @@ static void task_console(void *arg)
                 break;
             case 'p':
             case 'P': {
-                ESP_LOGI(TAG, "Enter web update period in seconds (1~300), then Enter:");
+                ESP_LOGI(TAG, "Current web update period: %d seconds", web_update_period_sec);
+                ESP_LOGI(TAG, "Enter new period (1~300) or ESC to cancel:");
                 char numbuf[8] = {0};
-                int idx = 0;
-                printf("> ");
-                fflush(stdout);
-
-                while (1) {
-                    int ch = getchar();
-                    if (ch == EOF) {
-                        vTaskDelay(pdMS_TO_TICKS(20));
-                        continue;
-                    }
-                    if (ch == '\n' || ch == '\r') {
-                        putchar('\n');
-                        fflush(stdout);
-                        break;
-                    }
-                    if (ch == 0x08 || ch == 0x7F) {
-                        if (idx > 0) {
-                            idx--;
-                            numbuf[idx] = '\0';
-                            printf("\b \b");
-                            fflush(stdout);
-                        }
-                        continue;
-                    }
-                    if (ch >= '0' && ch <= '9' && idx < (int)sizeof(numbuf) - 1) {
-                        numbuf[idx++] = (char)ch;
-                        numbuf[idx] = '\0';
-                        putchar(ch);
-                        fflush(stdout);
-                    }
+                if (!read_line_esc(numbuf, sizeof(numbuf))) break;
+                if (numbuf[0] == '\0') {
+                    ESP_LOGI(TAG, "No input. Period unchanged (%ds)", web_update_period_sec);
+                    break;
                 }
-
-                if (idx > 0) {
-                    int val = atoi(numbuf);
-                    if (val >= 1 && val <= 300) {
-                        web_update_period_sec = val;
-                        webserver_nvs_save_period(web_update_period_sec);
-                        ESP_LOGI(TAG, "Web update period set to %d seconds (saved to NVS)", web_update_period_sec);
-                    } else {
-                        ESP_LOGI(TAG, "Invalid value '%s' (must be 1~300). Period unchanged (%ds)", numbuf, web_update_period_sec);
-                    }
+                int val = atoi(numbuf);
+                if (val >= 1 && val <= 300) {
+                    web_update_period_sec = val;
+                    webserver_nvs_save_period(web_update_period_sec);
+                    ESP_LOGI(TAG, "Web update period set to %d seconds (saved to NVS)", web_update_period_sec);
                 } else {
-                    ESP_LOGI(TAG, "No number entered. Period unchanged (%ds)", web_update_period_sec);
+                    ESP_LOGI(TAG, "Invalid value '%s' (must be 1~300). Period unchanged (%ds)", numbuf, web_update_period_sec);
                 }
                 break;
             }
-            case 'i':
-            case 'I': {
-                int level = gpio_get_level(ETH_INT_PIN);
-                ESP_LOGI(TAG, "INT pin (GPIO%d) = %d (%s)", ETH_INT_PIN, level,
-                         level ? "released/idle" : "asserted/LOW");
-                break;
-            }
-            case 'h':
-            case 'H':
-                eth_app_recover();
-                break;
             case 'c':
             case 'C':
                 ESP_LOGI(TAG, "Starting manual calibration (measure channels)...");
                 ads131m08_calibrate_measure(64);
                 break;
-            case 's':
-            case 'S':
-                ads131m08_set_phase_mode(POWER_MODE_SINGLE);
-                break;
-            case 't':
-            case 'T':
-                ads131m08_set_phase_mode(POWER_MODE_THREE);
-                break;
             case 'm':
-            case 'M':
-                ESP_LOGI(TAG, "Current power mode: %s",
-                         (ads131m08_get_phase_mode() == POWER_MODE_SINGLE) ? "SINGLE" : "THREE");
+            case 'M': {
+                power_phase_mode_t cur = ads131m08_get_phase_mode();
+                ESP_LOGI(TAG, "Current phase mode: %s", (cur == POWER_MODE_SINGLE) ? "SINGLE" : "THREE");
+                ESP_LOGI(TAG, "Enter 1 (single) or 3 (three), or ESC to cancel:");
+                char buf[8] = {0};
+                if (!read_line_esc(buf, sizeof(buf))) break;
+                if (buf[0] == '1') {
+                    ads131m08_set_phase_mode(POWER_MODE_SINGLE);
+                } else if (buf[0] == '3') {
+                    ads131m08_set_phase_mode(POWER_MODE_THREE);
+                } else {
+                    ESP_LOGI(TAG, "Invalid input. Mode unchanged.");
+                }
                 break;
+            }
             case 'z':
             case 'Z':
                 phase_log_enabled = !phase_log_enabled;
@@ -142,17 +141,10 @@ static void task_console(void *arg)
                 break;
             case 'k':
             case 'K': {
-                ESP_LOGI(TAG, "Common channel config: enter '<1-6> <c|v|d>' then Enter  (c=current, v=voltage, d=DI)");
-                printf("> ");
-                fflush(stdout);
+                ESP_LOGI(TAG, "Common channel config. Current settings are restored from NVS at boot.");
+                ESP_LOGI(TAG, "Enter '<1-6> <c|v|d>' or ESC to cancel  (c=current, v=voltage, d=DI)");
                 char buf[16] = {0};
-                int idx = 0;
-                while (1) {
-                    int ch = getchar();
-                    if (ch == EOF) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
-                    if (ch == '\n' || ch == '\r') { putchar('\n'); fflush(stdout); break; }
-                    if (idx < (int)sizeof(buf)-1 && ch >= 32) { buf[idx++] = (char)ch; putchar(ch); fflush(stdout); }
-                }
+                if (!read_line_esc(buf, sizeof(buf))) break;
                 int common = 0;
                 char mode = 0;
                 if (sscanf(buf, "%d %c", &common, &mode) == 2 && common >= 1 && common <= 6) {
@@ -187,22 +179,18 @@ static void task_console(void *arg)
             }
             case 'j':
             case 'J': {
-                ESP_LOGI(TAG, "Set current channels for 3 phases. Codes: 0-7=ADC1, 8-15=ADC2, -1=unused");
-                ESP_LOGI(TAG, "Example: 0 1 8   then Enter");
-                printf("> ");
-                fflush(stdout);
+                current_source_mode_t mode = ads131m08_get_current_source();
+                ESP_LOGI(TAG, "Current source mode: %s", (mode == CURRENT_SRC_ADC1_CH0_2) ? "ADC1_CH0-2" : "CUSTOM");
+                ESP_LOGI(TAG, "Enter 3 channel codes (0-7=ADC1, 8-15=ADC2, -1=unused) or ESC to cancel");
+                ESP_LOGI(TAG, "Example: 0 1 8");
                 char buf[32] = {0};
-                int idx = 0;
-                while (1) {
-                    int ch = getchar();
-                    if (ch == EOF) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
-                    if (ch == '\n' || ch == '\r') { putchar('\n'); fflush(stdout); break; }
-                    if (idx < (int)sizeof(buf)-1 && ch >= 32) { buf[idx++] = (char)ch; putchar(ch); fflush(stdout); }
-                }
+                if (!read_line_esc(buf, sizeof(buf))) break;
                 int c0 = -1, c1 = -1, c2 = -1;
                 if (sscanf(buf, "%d %d %d", &c0, &c1, &c2) >= 1) {
                     ads131m08_set_current_source(CURRENT_SRC_CUSTOM, c0, c1, c2);
                     ESP_LOGI(TAG, "Current source set to channels %d, %d, %d (saved to NVS)", c0, c1, c2);
+                } else {
+                    ESP_LOGI(TAG, "Invalid input. Unchanged.");
                 }
                 break;
             }
@@ -213,7 +201,7 @@ static void task_console(void *arg)
             case '\r':
                 break;
             default:
-                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use a,w,p,i,h,c,s,t,m,z,k,j or / for help", c, c);
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use a,w,p,c,m,z,k,j or / for help", c, c);
                 break;
         }
     }
