@@ -1,0 +1,65 @@
+/* 
+ * phase_mode_and_console_patch.txt
+ * 
+ * 1. ads131m08.c 에 추가할 내용 (파일 상단 static 변수 영역)
+ */
+static power_phase_mode_t g_phase_mode = POWER_MODE_THREE;
+
+void ads131m08_set_phase_mode(power_phase_mode_t mode)
+{
+    if (mode == POWER_MODE_SINGLE || mode == POWER_MODE_THREE) {
+        g_phase_mode = mode;
+        ESP_LOGI(TAG, "Power phase mode = %s",
+                 (mode == POWER_MODE_SINGLE) ? "SINGLE" : "THREE");
+    }
+}
+
+power_phase_mode_t ads131m08_get_phase_mode(void)
+{
+    return g_phase_mode;
+}
+
+/*
+ * 2. task_power_calc() 내부 수정
+ *    - for (int p = 0; p < POWER_PHASES; p++) 를 phases 변수로 제한
+ *    - 로그 부분을 모드별로 변경
+ */
+// 예시 로그 부분 교체:
+// if (bems_acc_ms >= ...) {
+//     bems_acc_ms = 0;
+//     if (g_phase_mode == POWER_MODE_SINGLE) {
+//         ESP_LOGI(TAG, "BEMS [SINGLE] V=%.2f I=%.3f kW=%.3f PF=%.3f kWh=%.3f (%lu sps)",
+//                  power_result[0].vrms, power_result[0].irms,
+//                  power_result[0].kw, power_result[0].pf,
+//                  power_result[0].kwh, (unsigned long)power_sps_meas);
+//     } else {
+//         float total_kw = power_result[0].kw + power_result[1].kw + power_result[2].kw;
+//         ESP_LOGI(TAG, "BEMS [THREE] P1 %.2f/%.3f/%.3f | P2 %.2f/%.3f/%.3f | P3 %.2f/%.3f/%.3f | total=%.3f kW (%lu sps)",
+//                  power_result[0].vrms, power_result[0].irms, power_result[0].kw,
+//                  power_result[1].vrms, power_result[1].irms, power_result[1].kw,
+//                  power_result[2].vrms, power_result[2].irms, power_result[2].kw,
+//                  total_kw, (unsigned long)power_sps_meas);
+//     }
+// }
+
+/*
+ * 3. console.c 의 task_console switch 문에 추가
+ */
+// case 's':
+// case 'S':
+//     ads131m08_set_phase_mode(POWER_MODE_SINGLE);
+//     break;
+// case 't':
+// case 'T':
+//     ads131m08_set_phase_mode(POWER_MODE_THREE);
+//     break;
+// case 'm':
+// case 'M':
+//     ESP_LOGI(TAG, "Current power mode: %s",
+//              (ads131m08_get_phase_mode() == POWER_MODE_SINGLE) ? "SINGLE" : "THREE");
+//     break;
+
+/*
+ * 4. console 시작 시 명령어 안내 문자열에 추가:
+ *    "s=single, t=three, m=mode status"
+ */

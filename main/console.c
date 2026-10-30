@@ -14,21 +14,6 @@
 
 static const char *TAG = "console";
 
-static void cmd_dummy_1(void)
-{
-    ESP_LOGI(TAG, "[DUMMY1] Test command 1 executed");
-}
-
-static void cmd_dummy_2(void)
-{
-    ESP_LOGI(TAG, "[DUMMY2] Test command 2 executed");
-}
-
-static void cmd_dummy_3(void)
-{
-    ESP_LOGI(TAG, "[DUMMY3] Test command 3 executed");
-}
-
 static void task_console(void *arg)
 {
     ESP_LOGI(TAG, "Console ready. Commands: a, w, p, i, h, c, 1/2/3");
@@ -115,14 +100,23 @@ static void task_console(void *arg)
                 ESP_LOGI(TAG, "Starting manual calibration (measure channels)...");
                 ads131m08_calibrate_measure(64);
                 break;
-            case '1':
-                cmd_dummy_1();
+            case 's':
+            case 'S':
+                ads131m08_set_phase_mode(POWER_MODE_SINGLE);
                 break;
-            case '2':
-                cmd_dummy_2();
+            case 't':
+            case 'T':
+                ads131m08_set_phase_mode(POWER_MODE_THREE);
                 break;
-            case '3':
-                cmd_dummy_3();
+            case 'm':
+            case 'M':
+                ESP_LOGI(TAG, "Current power mode: %s",
+                         (ads131m08_get_phase_mode() == POWER_MODE_SINGLE) ? "SINGLE" : "THREE");
+                break;
+            case 'z':
+            case 'Z':
+                phase_log_enabled = !phase_log_enabled;
+                ESP_LOGI(TAG, "Phase logging %s", phase_log_enabled ? "ENABLED" : "DISABLED");
                 break;
             case '\n':
             case '\r':

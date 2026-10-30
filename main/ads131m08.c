@@ -15,6 +15,7 @@
 static const char *TAG = "ads131";
 
 bool adc_log_enabled = false;
+bool phase_log_enabled = false;
 
 static const char * const adc1_ch_names[ADC1_CH_COUNT] = {
     "ADC1_CH0 (AC_CURRENT1)",
@@ -184,6 +185,23 @@ typedef struct {
 static power_phase_t power_result[POWER_PHASES];
 static uint32_t power_sps_meas = 0;
 static float freq_hz = 0.0f;   // estimated from phase 1 voltage zero-crossing
+
+static power_phase_mode_t g_phase_mode = POWER_MODE_THREE;
+
+void ads131m08_set_phase_mode(power_phase_mode_t mode)
+{
+    if (mode == POWER_MODE_SINGLE || mode == POWER_MODE_THREE) {
+        g_phase_mode = mode;
+        ESP_LOGI(TAG, "Power phase mode = %s",
+                 (mode == POWER_MODE_SINGLE) ? "SINGLE" : "THREE");
+    }
+}
+
+power_phase_mode_t ads131m08_get_phase_mode(void)
+{
+    return g_phase_mode;
+}
+
 
 static volatile bool adc_paused = false;
 
@@ -457,6 +475,7 @@ static void task_power_calc(void *arg)
         power_sps_meas = (PP_POWER_WINDOW_MS > 0) ? (n * 1000 / PP_POWER_WINDOW_MS) : 0;
 
         if (n >= 8) {
+            int phases = (g_phase_mode == POWER_MODE_SINGLE) ? 1 : POWER_PHASES;
             double sum_v2[POWER_PHASES] = {0};
             double sum_i2[POWER_PHASES] = {0};
             double sum_p[POWER_PHASES] = {0};
@@ -466,7 +485,7 @@ static void task_power_calc(void *arg)
 
             for (uint32_t k = now - n; k < now; k++) {
                 const power_sample_t *s = &power_ring[k % POWER_RING_SIZE];
-                for (int p = 0; p < POWER_PHASES; p++) {
+                for (int p = 0; p < phases; p++) {
                     double v = (double)s->v[p] * PP_V_PER_COUNT;
                     double i = (double)s->i[p] * PP_I_PER_COUNT;
                     sum_v2[p] += v * v;
@@ -485,7 +504,7 @@ static void task_power_calc(void *arg)
                 freq_hz = (float)zc_count / dt_sec;
             }
 
-            for (int p = 0; p < POWER_PHASES; p++) {
+            for (int p = 0; p < phases; p++) {
                 float vrms = sqrtf((float)(sum_v2[p] / n));
                 float irms = sqrtf((float)(sum_i2[p] / n));
                 float p_w  = (float)(sum_p[p] / n);
@@ -507,20 +526,38 @@ static void task_power_calc(void *arg)
                 // Energy integration: kWh += kW * dt_hours
                 power_result[p].kwh += power_result[p].kw * (dt_sec / 3600.0f);
             }
+            // Clear unused phases in single mode
+            for (int p = phases; p < POWER_PHASES; ++p) {
+                power_result[p].vrms = 0.0f;
+                power_result[p].irms = 0.0f;
+                power_result[p].kw   = 0.0f;
+                power_result[p].kvar = 0.0f;
+                power_result[p].kva  = 0.0f;
+                power_result[p].pf   = 0.0f;
+            }
         }
         last_wr = now;
 
         bems_acc_ms += PP_POWER_WINDOW_MS;
         if (bems_acc_ms >= (uint32_t)PP_BEMS_PERIOD_SEC * 1000) {
             bems_acc_ms = 0;
-#if 0
-            ESP_LOGI(TAG, "BEMS P1 Vrms=%.2f Irms=%.3f kW=%.3f PF=%.3f | "
-                          "P2 %.2f/%.3f/%.3f/%.3f | P3 %.2f/%.3f/%.3f/%.3f (%lu sps)",
-                     power_result[0].vrms, power_result[0].irms, power_result[0].kw, power_result[0].pf,
-                     power_result[1].vrms, power_result[1].irms, power_result[1].kw, power_result[1].pf,
-                     power_result[2].vrms, power_result[2].irms, power_result[2].kw, power_result[2].pf,
-                     (unsigned long)power_sps_meas);
-#endif
+            if(phase_log_enabled) {
+                if (g_phase_mode == POWER_MODE_SINGLE) {
+                    ESP_LOGI(TAG, "BEMS [SINGLE] Vrms=%.2f Irms=%.3f kW=%.3f PF=%.3f kWh=%.3f (%lu sps)",
+                            power_result[0].vrms, power_result[0].irms,
+                            power_result[0].kw, power_result[0].pf,
+                            power_result[0].kwh, (unsigned long)power_sps_meas);
+                } else {
+                    float total_kw = power_result[0].kw + power_result[1].kw + power_result[2].kw;
+                    ESP_LOGI(TAG, "BEMS [THREE] P1 %.2f/%.3f/%.3f/%.3f | "
+                                "P2 %.2f/%.3f/%.3f/%.3f | "
+                                "P3 %.2f/%.3f/%.3f/%.3f | total_kW=%.3f (%lu sps)",
+                            power_result[0].vrms, power_result[0].irms, power_result[0].kw, power_result[0].pf,
+                            power_result[1].vrms, power_result[1].irms, power_result[1].kw, power_result[1].pf,
+                            power_result[2].vrms, power_result[2].irms, power_result[2].kw, power_result[2].pf,
+                            total_kw, (unsigned long)power_sps_meas);
+                }
+            }
         }
     }
 }

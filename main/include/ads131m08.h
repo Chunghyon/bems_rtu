@@ -81,6 +81,7 @@ typedef enum {
 } power_phase_mode_t;
 
 extern bool adc_log_enabled;
+extern bool phase_log_enabled;
 
 void ads131m08_init(void);
 void ads131m08_start_tasks(void);
