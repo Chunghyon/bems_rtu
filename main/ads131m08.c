@@ -513,12 +513,14 @@ static void task_power_calc(void *arg)
         bems_acc_ms += PP_POWER_WINDOW_MS;
         if (bems_acc_ms >= (uint32_t)PP_BEMS_PERIOD_SEC * 1000) {
             bems_acc_ms = 0;
+#if 0
             ESP_LOGI(TAG, "BEMS P1 Vrms=%.2f Irms=%.3f kW=%.3f PF=%.3f | "
                           "P2 %.2f/%.3f/%.3f/%.3f | P3 %.2f/%.3f/%.3f/%.3f (%lu sps)",
                      power_result[0].vrms, power_result[0].irms, power_result[0].kw, power_result[0].pf,
                      power_result[1].vrms, power_result[1].irms, power_result[1].kw, power_result[1].pf,
                      power_result[2].vrms, power_result[2].irms, power_result[2].kw, power_result[2].pf,
                      (unsigned long)power_sps_meas);
+#endif
         }
     }
 }

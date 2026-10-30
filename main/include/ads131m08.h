@@ -34,8 +34,8 @@
 #define PP_BEMS_PERIOD_SEC		5       // publish interval (1~5 s)
 // Scale: ADC LSB (≈1.2 V / 2^23) × PT or CT ratio. Tune to the front-end.
 #define PP_ADC_LSB_V			(1.2f / 8388608.0f)
-#define PP_PT_RATIO				1.0f    // primary volts / ADC-pin volt
-#define PP_CT_RATIO				1.0f    // primary amps / ADC-pin volt
+#define PP_PT_RATIO				1.0f    // primary volts / ADC-pin volt  (tune per ZMPT / onboard)
+#define PP_CT_RATIO				1.0f    // primary amps / ADC-pin volt   (tune per CT + 10ohm PD)
 #define PP_V_PER_COUNT			(PP_ADC_LSB_V * PP_PT_RATIO)
 #define PP_I_PER_COUNT			(PP_ADC_LSB_V * PP_CT_RATIO)
 
@@ -44,6 +44,9 @@ extern "C" {
 #endif
 
 // ADC1 channels
+// ch0~2: current inputs after 10ohm pull-down
+// ch3~5: voltage inputs (on-board divider or external ZMPT101B)
+// ch6~7: common1~2 (configurable via PCA9555 10V_SEL / CUR_SEL)
 typedef enum {
     ADC1_AC_CURRENT1 = 0,
     ADC1_AC_CURRENT2,
@@ -57,6 +60,8 @@ typedef enum {
 } adc1_channel_t;
 
 // ADC2 channels
+// ch0~3: common3~6 (configurable via PCA9555 DI_SEL + 10V_SEL / CUR_SEL)
+// ch4~7: reserved, not connected
 typedef enum {
     ADC2_COMMON3 = 0,
     ADC2_COMMON4,
