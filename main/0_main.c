@@ -127,9 +127,10 @@ void app_main(void)
                 uint8_t val = 0;
                 if (nvs_get_u8(h, key, &val) == ESP_OK) {
                     di_sel_t di = (di_sel_t)((val >> 4) & 0xF);
-                    cv_sel_t cv = (cv_sel_t)(val & 0xF);
-                    pca9555_config_common((common_sel_t)c, di, cv, R_SEL_49K9);
-                    ESP_LOGI(TAG, "Restored common%d: di=%d cv=%d", c, di, cv);
+                    cv_sel_t cv = (cv_sel_t)(val & 0x3);
+                    r_sel_t rs = (r_sel_t)((val >> 3) & 1);
+                    pca9555_config_common((common_sel_t)c, di, cv, rs);
+                    ESP_LOGI(TAG, "Restored common%d: di=%d cv=%d rs=%d", c, di, cv, rs);
                 }
             }
             nvs_close(h);

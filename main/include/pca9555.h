@@ -8,9 +8,9 @@ extern "C" {
 
 // PCA9555PWR ports (16-bit expander)
 // Mapping from hardware:
-// Port0.0-5 : PCA_10V_SEL1~6  (voltage input resistance select: 0=49.9k, 1=99.8k per side)
+// Port0.0-5 : PCA_10V_SEL1~6  (voltage input resistance: 1=49.9k, 0=99.8k)
 // Port0.6-7 : PCA_DI_SEL1~2
-// Port1.0-5 : PCA_CUR_SEL1~6  (current termination select: 0=49.9ohm, 1=open)
+// Port1.0-5 : PCA_CUR_SEL1~6  (current termination: 1=49.9ohm/current, 0=open/voltage)
 // Port1.6-7 : PCA_DI_SEL3~4
 typedef enum {
     PCA_10V_SEL1 = 0,
@@ -42,18 +42,18 @@ typedef enum {
 } common_sel_t;
 
 typedef enum {
-    DI_SEL_DIGITAL = 0,
-    DI_SEL_ANALOG  = 1
+    DI_SEL_ANALOG  = 0,   // Low  = ADC path
+    DI_SEL_DIGITAL = 1    // High = DI/pulse (NO)
 } di_sel_t;
 
 typedef enum {
-    CV_SEL_CURRENT = 0,
-    CV_SEL_VOLTAGE = 1
+    CV_SEL_VOLTAGE = 0,   // Low  = open (voltage)
+    CV_SEL_CURRENT = 1    // High = 49.9ohm (current)
 } cv_sel_t;
 
 typedef enum {
-    R_SEL_49K9  = 0,
-    R_SEL_99K8  = 1
+    R_SEL_99K8  = 0,      // Low  = 99.8k
+    R_SEL_49K9  = 1       // High = 49.9k
 } r_sel_t;
 
 void pca9555_init(void);

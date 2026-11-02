@@ -144,7 +144,7 @@ static esp_err_t control_post_handler(httpd_req_t *req)
             int state = atoi(st);
             if (relay >= 1 && relay <= 16 && (state == 0 || state == 1)) {
                 pca9555_set_pin((pca9555_port_t)(relay - 1), state);
-                ESP_LOGI(TAG, "WEB relay %d -> %s", relay, state ? "ON" : "OFF");
+                ESP_LOGI(TAG, "WEB relay %d -> %s", relay, state ? "NO" : "NC");
                 // Keep common-channel NVS in sync if this pin belongs to a common
                 // (optional but keeps boot restore consistent)
             }
@@ -250,6 +250,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         ".line{white-space:nowrap;margin:0.3em 0;}"
         ".relay-row{display:flex;flex-wrap:nowrap;gap:4px;margin:4px 0;}"
         ".relay-item{flex:0 0 88px;text-align:center;}"
+        ".relay-desc{margin-left:8px;align-self:center;font-size:0.85em;color:#555;}"
         ".relay-item form{margin:0;}"
         ".relay-item button{margin-left:2px;}"
         "</style>"
@@ -371,8 +372,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         // Derive current mode/range from actual pin levels
         pca9555_port_t cur_port = (pca9555_port_t)(PCA_CUR_SEL1 + (cm - 1));
         pca9555_port_t v_port   = (pca9555_port_t)(PCA_10V_SEL1 + (cm - 1));
-        int cur_level = pca9555_get_pin(cur_port);   // 0=current(49.9ohm), 1=open
-        int v_level   = pca9555_get_pin(v_port);     // 0=49.9k, 1=99.8k
+        int cur_level = pca9555_get_pin(cur_port);   // 1=current(49.9ohm), 0=open
+        int v_level   = pca9555_get_pin(v_port);     // 1=49.9k, 0=99.8k
         int di_level  = 0;
         if (cm >= 3) {
             pca9555_port_t di_port;
@@ -380,17 +381,24 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             else if (cm == 4) di_port = PCA_DI_SEL2;
             else if (cm == 5) di_port = PCA_DI_SEL3;
             else di_port = PCA_DI_SEL4;
-            di_level = pca9555_get_pin(di_port);     // 0=pulse, 1=ADC
+            di_level = pca9555_get_pin(di_port);     // 1=pulse/DI, 0=ADC
         }
 
         char mode = 'c';
-        char range = (v_level == 1) ? 'h' : 'l';
-        if (cm >= 3 && di_level == 0) {
-            mode = 'd';   // DI / pulse path
-        } else if (cur_level == 0) {
-            mode = 'c';   // current termination active
+        char range = (v_level == 1) ? 'l' : 'h';   // 1=49.9k=Low, 0=99.8k=High
+        const char *di_txt = "-";
+        const char *cur_txt = (cur_level == 1) ? "NO(49.9Ω)" : "NC(open)";
+        const char *v_txt = (v_level == 1) ? "NO(49.9k)" : "NC(99.8k)";
+        if (cm >= 3 && di_level == 1) {
+            mode = 'd';
+            di_txt = "NO";
+            cur_txt = "x";   // don't care
+        } else if (cur_level == 1) {
+            mode = 'c';
+            di_txt = (cm >= 3) ? "NC" : "-";
         } else {
-            mode = 'v';   // voltage path (CUR open)
+            mode = 'v';
+            di_txt = (cm >= 3) ? "NC" : "-";
         }
 
         // C1~C2 dim when corresponding ADC1 CH6/CH7 is OFF
@@ -420,31 +428,60 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             (cm >= 3) ? (mode == 'd' ? "<option value='d' selected>DI</option>" : "<option value='d'>DI</option>") : "",
             (range == 'l') ? " selected" : "",
             (range == 'h') ? " selected" : "");
-        if (cm == 3) {
+        if (cm == 2) {
             len += snprintf(buf + len, 32768 - len, "</div><div class='common-row'>");
         }
     }
     len += snprintf(buf + len, 32768 - len, "</div></div>");
 
-    // 16 relays
-    len += snprintf(buf + len, 32768 - len, "<div style='margin-top:0.5em;'><b>Relays (1~16)</b><br>");
+    // Relays grouped by function
+    len += snprintf(buf + len, 32768 - len, "<div style='margin-top:0.5em;'><b>Relays</b><br>");
+
+    // R01~R06 : 10V select
     len += snprintf(buf + len, 32768 - len, "<div class='relay-row'>");
-    for (int r = 1; r <= 16 && len < 32768 - 180; r++) {
+    for (int r = 1; r <= 6 && len < 32768 - 150; r++) {
         int st = pca9555_get_pin((pca9555_port_t)(r - 1));
         len += snprintf(buf + len, 32768 - len,
-            "<div class='relay-item'>"
-            "<form method='POST' action='/control'>"
+            "<div class='relay-item'><form method='POST' action='/control'>"
             "<input type='hidden' name='action' value='relay'>"
             "<input type='hidden' name='relay' value='%d'>"
             "<input type='hidden' name='state' value='%d'>"
-            "R%02d <button type='submit' class='%s'>%s</button>"
-            "</form></div>",
-            r, st ? 0 : 1, r, st ? "btn-nc" : "btn-no", st ? "NC" : "NO");
-        if (r == 8) {
-            len += snprintf(buf + len, 32768 - len, "</div><div class='relay-row'>");
-        }
+            "R%02d <button type='submit' class='%s'>%s</button></form></div>",
+            r, st ? 0 : 1, r, st ? "btn-no" : "btn-nc", st ? "NO" : "NC");
     }
-    len += snprintf(buf + len, 32768 - len, "</div></div>");
+    len += snprintf(buf + len, 32768 - len, "<span class='relay-desc'>(NO 49.9K, NC 99.8K)</span></div>");
+
+    // R09~R14 : Current/Voltage
+    len += snprintf(buf + len, 32768 - len, "<div class='relay-row'>");
+    for (int r = 9; r <= 14 && len < 32768 - 150; r++) {
+        int st = pca9555_get_pin((pca9555_port_t)(r - 1));
+        len += snprintf(buf + len, 32768 - len,
+            "<div class='relay-item'><form method='POST' action='/control'>"
+            "<input type='hidden' name='action' value='relay'>"
+            "<input type='hidden' name='relay' value='%d'>"
+            "<input type='hidden' name='state' value='%d'>"
+            "R%02d <button type='submit' class='%s'>%s</button></form></div>",
+            r, st ? 0 : 1, r, st ? "btn-no" : "btn-nc", st ? "NO" : "NC");
+    }
+    len += snprintf(buf + len, 32768 - len, "<span class='relay-desc'>(NO Current, NC Voltage)</span></div>");
+
+    // R07/08/15/16 : DI select (aligned under R11~R14)
+    len += snprintf(buf + len, 32768 - len, "<div class='relay-row'>");
+    len += snprintf(buf + len, 32768 - len, "<div class='relay-item' style='visibility:hidden;'></div>");
+    len += snprintf(buf + len, 32768 - len, "<div class='relay-item' style='visibility:hidden;'></div>");
+    int di_relays[] = {7, 8, 15, 16};
+    for (int i = 0; i < 4 && len < 32768 - 150; i++) {
+        int r = di_relays[i];
+        int st = pca9555_get_pin((pca9555_port_t)(r - 1));
+        len += snprintf(buf + len, 32768 - len,
+            "<div class='relay-item'><form method='POST' action='/control'>"
+            "<input type='hidden' name='action' value='relay'>"
+            "<input type='hidden' name='relay' value='%d'>"
+            "<input type='hidden' name='state' value='%d'>"
+            "R%02d <button type='submit' class='%s'>%s</button></form></div>",
+            r, st ? 0 : 1, r, st ? "btn-no" : "btn-nc", st ? "NO" : "NC");
+    }
+    len += snprintf(buf + len, 32768 - len, "<span class='relay-desc'>(NO Digital, NC Analog)</span></div></div>");
 
     // Data sections
     len += snprintf(buf + len, 32768 - len,
@@ -460,7 +497,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         else if (cm == 5) di_port = PCA_DI_SEL3;
         else di_port = PCA_DI_SEL4;
         int di_level = pca9555_get_pin(di_port);  // 0 = DI/pulse
-        bool is_di = (di_level == 0);
+        bool is_di = (di_level == 1);
         if (is_di) {
             len += snprintf(buf + len, 32768 - len,
                 "<tr><td>%d</td><td>%lu</td></tr>", p + 1, pulses[p]);

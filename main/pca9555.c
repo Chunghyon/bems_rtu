@@ -133,16 +133,16 @@ void pca9555_config_common(common_sel_t common_sel, di_sel_t di_sel, cv_sel_t cv
         else if (common_sel == 5) di_port = PCA_DI_SEL3;
         else di_port = PCA_DI_SEL4;  // common6
 
-        // 0 = pulse input (ADC unused), 1 = ADC used
+        // 1 = DI/pulse (NO), 0 = ADC path
         pca9555_set_pin(di_port, di_sel);
     }
 
     pca9555_port_t cur_port = (pca9555_port_t)(PCA_CUR_SEL1 + (common_sel - 1));
     pca9555_port_t v_port   = (pca9555_port_t)(PCA_10V_SEL1 + (common_sel - 1));
 
-    // CUR_SEL: 0 = 49.9ohm, 1 = open
+    // CUR_SEL: 1 = 49.9ohm (current), 0 = open (voltage)
     pca9555_set_pin(cur_port, (int)cv_sel);
-    // 10V_SEL: 0 = 49.9k, 1 = 99.8k
+    // 10V_SEL: 1 = 49.9k, 0 = 99.8k
     pca9555_set_pin(v_port, (int)r_sel);
 
 }
