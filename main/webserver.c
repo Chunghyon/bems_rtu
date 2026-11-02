@@ -118,6 +118,12 @@ static esp_err_t control_post_handler(httpd_req_t *req)
                     pca9555_config_common((common_sel_t)common, di, cv, rs);
                     ESP_LOGI(TAG, "WEB common%d -> mode=%c range=%c (cv=%d di=%d rs=%d)",
                              common, mode, range, cv, di, rs);
+                    // DI mode does not use ADC: turn off corresponding ADC2 channel
+                    if (mode == 'd' && common >= 3 && common <= 6) {
+                        int adc_ch = common - 3;  // C3→ADC2_CH0 ... C6→ADC2_CH3
+                        ads131m08_set_channel_enable(2, adc_ch, false);
+                        ESP_LOGI(TAG, "WEB DI mode: ADC2 CH%d forced OFF", adc_ch);
+                    }
                     nvs_handle_t h;
                     if (nvs_open("rtu_cfg", NVS_READWRITE, &h) == ESP_OK) {
                         char key[8];
@@ -153,6 +159,17 @@ static esp_err_t control_post_handler(httpd_req_t *req)
     } else if (strcmp(action, "calib") == 0) {
         ads131m08_calibrate_measure(64);
         ESP_LOGI(TAG, "WEB full calibration done");
+    } else if (strcmp(action, "ch_en") == 0) {
+        char adc_s[8]={0}, ch_s[8]={0}, en_s[8]={0};
+        if (httpd_query_key_value(buf, "adc", adc_s, sizeof(adc_s)) == ESP_OK &&
+            httpd_query_key_value(buf, "ch", ch_s, sizeof(ch_s)) == ESP_OK &&
+            httpd_query_key_value(buf, "en", en_s, sizeof(en_s)) == ESP_OK) {
+            int adc = atoi(adc_s);
+            int ch = atoi(ch_s);
+            bool en = (atoi(en_s) != 0);
+            ads131m08_set_channel_enable(adc, ch, en);
+            ESP_LOGI(TAG, "WEB ADC%d CH%d %s", adc, ch, en ? "ON" : "OFF");
+        }
     } else if (strcmp(action, "calib_ch") == 0) {
         char adc_s[8]={0}, ch_s[8]={0};
         if (httpd_query_key_value(buf, "adc", adc_s, sizeof(adc_s)) == ESP_OK &&
@@ -173,7 +190,7 @@ static esp_err_t control_post_handler(httpd_req_t *req)
 
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
-    char *buf = malloc(20480);
+    char *buf = malloc(32768);
     if (!buf) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
@@ -203,7 +220,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     ads131m08_get_current_channels(&c0,&c1,&c2);
     ads131m08_get_voltage_channels(&v0,&v1,&v2);
 
-    int len = snprintf(buf, 20480,
+    int len = snprintf(buf, 32768,
         "<!DOCTYPE html><html><head><meta charset='utf-8'>%s"
         "<title>BEMS RTU</title>"
         "<style>"
@@ -223,9 +240,16 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "h2{margin:0.4em 0;font-size:1.1em;}"
         "form{margin:0.2em 0;}"
         "input,select,button{margin:0.1em;padding:2px 6px;}"
+        "input[type=number]{width:2.2em;}"
+        ".btn-on{background:#4CAF50;color:#fff;border:1px solid #388E3C;width:3.2em;}"
+        ".btn-off{background:#9E9E9E;color:#fff;border:1px solid #757575;width:3.2em;}"
+        ".btn-no{background:#78909C;color:#fff;border:1px solid #546E7A;width:3.2em;}"
+        ".btn-nc{background:#FF9800;color:#fff;border:1px solid #F57C00;width:3.2em;}"
+        ".off-row{opacity:0.4;color:#888;}"
+        ".off-row button{display:none;}"
         ".line{white-space:nowrap;margin:0.3em 0;}"
         ".relay-row{display:flex;flex-wrap:nowrap;gap:4px;margin:4px 0;}"
-        ".relay-item{flex:0 0 100px;text-align:center;}"
+        ".relay-item{flex:0 0 88px;text-align:center;}"
         ".relay-item form{margin:0;}"
         ".relay-item button{margin-left:2px;}"
         "</style>"
@@ -280,40 +304,70 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         phase_log_enabled ? "ON" : "OFF");
 
     // Control panel
-    len += snprintf(buf + len, 20480 - len,
+    len += snprintf(buf + len, 32768 - len,
         "<div class='box'><h2>Control</h2>"
         "<div class='line'>"
         "<form method='POST' action='/control' style='display:inline;'>"
         "<input type='hidden' name='action' value='period'>"
-        "Web period (s): <input name='period' type='number' min='1' max='300' value='%d' size='4'>"
-        "<button type='submit'>Set</button></form>"
+        "Web period (s): <input name='period' type='number' min='1' max='300' value='%d' size='4' onchange='this.form.submit()'>"
+        "</form>"
         "&nbsp;&nbsp;"
         "<form method='POST' action='/control' style='display:inline;'>"
         "<input type='hidden' name='action' value='phase'>"
-        "Phase mode: <select name='mode'><option value='1'%s>Single</option><option value='3'%s>Three</option></select>"
-        "<button type='submit'>Set</button></form>"
+        "Phase mode: <select name='mode' onchange='this.form.submit()'><option value='1'%s>Single</option><option value='3'%s>Three</option></select>"
+        "</form>"
         "</div>"
-        "<form method='POST' action='/control' class='line'>"
+        "<div class='line'>"
+        "<form method='POST' action='/control' style='display:inline;'>"
         "<input type='hidden' name='action' value='current'>"
-        "Current ch: <input name='c0' type='number' value='%d' size='3'> "
-        "<input name='c1' type='number' value='%d' size='3'> "
-        "<input name='c2' type='number' value='%d' size='3'> "
+        "Current ch: <input name='c0' type='number' value='%d' size='2'> "
+        "<input name='c1' type='number' value='%d' size='2'> "
+        "<input name='c2' type='number' value='%d' size='2'> "
         "<button type='submit'>Set</button></form>"
-        "<form method='POST' action='/control' class='line'>"
+        "&nbsp;&nbsp;"
+        "<form method='POST' action='/control' style='display:inline;'>"
         "<input type='hidden' name='action' value='voltage'>"
-        "Voltage ch: <input name='v0' type='number' value='%d' size='3'> "
-        "<input name='v1' type='number' value='%d' size='3'> "
-        "<input name='v2' type='number' value='%d' size='3'> "
-        "<button type='submit'>Set</button></form>",
+        "Voltage ch: <input name='v0' type='number' value='%d' size='2'> "
+        "<input name='v1' type='number' value='%d' size='2'> "
+        "<input name='v2' type='number' value='%d' size='2'> "
+        "<button type='submit'>Set</button></form>"
+        "</div>",
         web_update_period_sec,
         (pmode == POWER_MODE_SINGLE) ? " selected" : "",
         (pmode == POWER_MODE_THREE) ? " selected" : "",
         c0, c1, c2, v0, v1, v2);
 
+    // ADC channel enable/disable
+    len += snprintf(buf + len, 32768 - len, "<div style='margin-top:0.4em;'><b>ADC1 CH enable</b><br>");
+    for (int ch = 0; ch < 8 && len < 32768 - 120; ch++) {
+        bool on = ads131m08_get_channel_enable(1, ch);
+        len += snprintf(buf + len, 32768 - len,
+            "<form method='POST' action='/control' style='display:inline-block;margin:1px;'>"
+            "<input type='hidden' name='action' value='ch_en'>"
+            "<input type='hidden' name='adc' value='1'>"
+            "<input type='hidden' name='ch' value='%d'>"
+            "<input type='hidden' name='en' value='%d'>"
+            "CH%d <button type='submit' class='%s'>%s</button></form> ",
+            ch, on ? 0 : 1, ch, on ? "btn-on" : "btn-off", on ? "ON" : "OFF");
+    }
+    len += snprintf(buf + len, 32768 - len, "<br><b>ADC2 CH enable</b><br>");
+    for (int ch = 0; ch <= 3 && len < 32768 - 120; ch++) {
+        bool on = ads131m08_get_channel_enable(2, ch);
+        len += snprintf(buf + len, 32768 - len,
+            "<form method='POST' action='/control' style='display:inline-block;margin:1px;'>"
+            "<input type='hidden' name='action' value='ch_en'>"
+            "<input type='hidden' name='adc' value='2'>"
+            "<input type='hidden' name='ch' value='%d'>"
+            "<input type='hidden' name='en' value='%d'>"
+            "CH%d <button type='submit' class='%s'>%s</button></form> ",
+            ch, on ? 0 : 1, ch, on ? "btn-on" : "btn-off", on ? "ON" : "OFF");
+    }
+    len += snprintf(buf + len, 32768 - len, "</div>");
+
     // Common 1~6 individual controls (reflect actual PCA9555 pin state)
-    len += snprintf(buf + len, 20480 - len, "<div style='margin-top:0.5em;'><b>Common channels</b><br>");
-    len += snprintf(buf + len, 20480 - len, "<div class='common-row'>");
-    for (int cm = 1; cm <= 6 && len < 20480 - 250; cm++) {
+    len += snprintf(buf + len, 32768 - len, "<div style='margin-top:0.5em;'><b>Common channels</b><br>");
+    len += snprintf(buf + len, 32768 - len, "<div class='common-row'>");
+    for (int cm = 1; cm <= 6 && len < 32768 - 250; cm++) {
         // Derive current mode/range from actual pin levels
         pca9555_port_t cur_port = (pca9555_port_t)(PCA_CUR_SEL1 + (cm - 1));
         pca9555_port_t v_port   = (pca9555_port_t)(PCA_10V_SEL1 + (cm - 1));
@@ -339,103 +393,143 @@ static esp_err_t root_get_handler(httpd_req_t *req)
             mode = 'v';   // voltage path (CUR open)
         }
 
-        len += snprintf(buf + len, 20480 - len,
-            "<form method='POST' action='/control' style='display:inline-block;margin:2px;'>"
+        // C1~C2 dim when corresponding ADC1 CH6/CH7 is OFF
+        // C3~C6 do NOT dim when ADC2 is OFF (DI mode intentionally turns ADC off)
+        bool cm_on = true;
+        if (cm <= 2) cm_on = ads131m08_get_channel_enable(1, 5 + cm);  // common1~2 = ADC1 ch6~7
+        // common3~6: always enabled in UI (DI doesn't use ADC)
+
+        const char *extra = cm_on ? "" : "opacity:0.4;pointer-events:none;";
+        len += snprintf(buf + len, 32768 - len,
+            "<form method='POST' action='/control' style='display:inline-block;margin:2px;%s'>"
             "<input type='hidden' name='action' value='common'>"
             "<input type='hidden' name='common' value='%d'>"
-            "C%d: <select name='mode'>"
+            "C%d: <select name='mode' onchange='this.form.submit()'>"
             "<option value='c'%s>Current</option>"
             "<option value='v'%s>Voltage</option>"
             "%s"
             "</select>"
-            "<select name='range'>"
+            "<select name='range' onchange='this.form.submit()'>"
             "<option value='l'%s>Low (49.9k)</option>"
             "<option value='h'%s>High (99.8k)</option>"
             "</select>"
-            "<button type='submit'>Set</button></form>",
-            cm, cm,
+            "</form>",
+            extra, cm, cm,
             (mode == 'c') ? " selected" : "",
             (mode == 'v') ? " selected" : "",
             (cm >= 3) ? (mode == 'd' ? "<option value='d' selected>DI</option>" : "<option value='d'>DI</option>") : "",
             (range == 'l') ? " selected" : "",
             (range == 'h') ? " selected" : "");
         if (cm == 3) {
-            len += snprintf(buf + len, 20480 - len, "</div><div class='common-row'>");
+            len += snprintf(buf + len, 32768 - len, "</div><div class='common-row'>");
         }
     }
-    len += snprintf(buf + len, 20480 - len, "</div></div>");
+    len += snprintf(buf + len, 32768 - len, "</div></div>");
 
     // 16 relays
-    len += snprintf(buf + len, 20480 - len, "<div style='margin-top:0.5em;'><b>Relays (1~16)</b><br>");
-    len += snprintf(buf + len, 20480 - len, "<div class='relay-row'>");
-    for (int r = 1; r <= 16 && len < 20480 - 180; r++) {
+    len += snprintf(buf + len, 32768 - len, "<div style='margin-top:0.5em;'><b>Relays (1~16)</b><br>");
+    len += snprintf(buf + len, 32768 - len, "<div class='relay-row'>");
+    for (int r = 1; r <= 16 && len < 32768 - 180; r++) {
         int st = pca9555_get_pin((pca9555_port_t)(r - 1));
-        len += snprintf(buf + len, 20480 - len,
+        len += snprintf(buf + len, 32768 - len,
             "<div class='relay-item'>"
             "<form method='POST' action='/control'>"
             "<input type='hidden' name='action' value='relay'>"
             "<input type='hidden' name='relay' value='%d'>"
-            "R%d <select name='state'>"
-            "<option value='0'%s>OFF</option>"
-            "<option value='1'%s>ON</option>"
-            "</select>"
-            "<button type='submit'>Set</button>"
+            "<input type='hidden' name='state' value='%d'>"
+            "R%02d <button type='submit' class='%s'>%s</button>"
             "</form></div>",
-            r, r,
-            (st == 0) ? " selected" : "",
-            (st == 1) ? " selected" : "");
+            r, st ? 0 : 1, r, st ? "btn-nc" : "btn-no", st ? "NC" : "NO");
         if (r == 8) {
-            len += snprintf(buf + len, 20480 - len, "</div><div class='relay-row'>");
+            len += snprintf(buf + len, 32768 - len, "</div><div class='relay-row'>");
         }
     }
-    len += snprintf(buf + len, 20480 - len, "</div></div>");
+    len += snprintf(buf + len, 32768 - len, "</div></div>");
 
     // Data sections
-    len += snprintf(buf + len, 20480 - len,
+    len += snprintf(buf + len, 32768 - len,
         "<div class='row'>"
-        "<div class='box pulse-box'><h2>Pulse</h2><table><tr><th>CH</th><th>Count</th></tr>"
-        "<tr><td>1</td><td>%lu</td></tr><tr><td>2</td><td>%lu</td></tr>"
-        "<tr><td>3</td><td>%lu</td></tr><tr><td>4</td><td>%lu</td></tr></table></div>"
-        "<div class='box cv-box'><h2>Current/Voltage</h2><table><tr><th>CH</th><th>Value</th><th></th></tr>",
-        pulses[0], pulses[1], pulses[2], pulses[3]);
+        "<div class='box pulse-box'><h2>Pulse</h2><table><tr><th>CH</th><th>Count</th></tr>");
+
+    // Pulse 1~4 correspond to Common3~6 DI mode
+    for (int p = 0; p < 4 && len < 32768 - 80; p++) {
+        int cm = p + 3;  // common3~6
+        pca9555_port_t di_port;
+        if (cm == 3) di_port = PCA_DI_SEL1;
+        else if (cm == 4) di_port = PCA_DI_SEL2;
+        else if (cm == 5) di_port = PCA_DI_SEL3;
+        else di_port = PCA_DI_SEL4;
+        int di_level = pca9555_get_pin(di_port);  // 0 = DI/pulse
+        bool is_di = (di_level == 0);
+        if (is_di) {
+            len += snprintf(buf + len, 32768 - len,
+                "<tr><td>%d</td><td>%lu</td></tr>", p + 1, pulses[p]);
+        } else {
+            len += snprintf(buf + len, 32768 - len,
+                "<tr class='off-row'><td>%d</td><td>-</td></tr>", p + 1);
+        }
+    }
+    len += snprintf(buf + len, 32768 - len, "</table></div>"
+        "<div class='box cv-box'><h2>Current/Voltage</h2><table><tr><th>CH</th><th>Value</th><th></th></tr>");
 
     // ADC1 ch0~5 : current + voltage
-    for (int ch = 0; ch <= 5 && len < 20480 - 150; ch++) {
-        len += snprintf(buf + len, 20480 - len,
-            "<tr><td>%s</td><td>%ld</td>"
-            "<td><form method='POST' action='/control' style='display:inline;margin:0;'>"
-            "<input type='hidden' name='action' value='calib_ch'>"
-            "<input type='hidden' name='adc' value='1'>"
-            "<input type='hidden' name='ch' value='%d'>"
-            "<button type='submit'>Cal</button></form></td></tr>",
-            ads131m08_ch_name_adc1(ch), adc1[ch], ch);
+    for (int ch = 0; ch <= 5 && len < 32768 - 180; ch++) {
+        bool on = ads131m08_get_channel_enable(1, ch);
+        if (on) {
+            len += snprintf(buf + len, 32768 - len,
+                "<tr><td>%s</td><td>%ld</td>"
+                "<td><form method='POST' action='/control' style='display:inline;margin:0;'>"
+                "<input type='hidden' name='action' value='calib_ch'>"
+                "<input type='hidden' name='adc' value='1'>"
+                "<input type='hidden' name='ch' value='%d'>"
+                "<button type='submit'>Cal</button></form></td></tr>",
+                ads131m08_ch_name_adc1(ch), adc1[ch], ch);
+        } else {
+            len += snprintf(buf + len, 32768 - len,
+                "<tr class='off-row'><td>%s</td><td>-</td><td></td></tr>",
+                ads131m08_ch_name_adc1(ch));
+        }
     }
-    len += snprintf(buf + len, 20480 - len, "</table></div>"
+    len += snprintf(buf + len, 32768 - len, "</table></div>"
         "<div class='box common-box'><h2>Common</h2><table><tr><th>CH</th><th>Value</th><th></th></tr>");
 
     // ADC1 ch6~7 : common1~2
-    for (int ch = 6; ch <= 7 && len < 20480 - 150; ch++) {
-        len += snprintf(buf + len, 20480 - len,
-            "<tr><td>%s</td><td>%ld</td>"
-            "<td><form method='POST' action='/control' style='display:inline;margin:0;'>"
-            "<input type='hidden' name='action' value='calib_ch'>"
-            "<input type='hidden' name='adc' value='1'>"
-            "<input type='hidden' name='ch' value='%d'>"
-            "<button type='submit'>Cal</button></form></td></tr>",
-            ads131m08_ch_name_adc1(ch), adc1[ch], ch);
+    for (int ch = 6; ch <= 7 && len < 32768 - 180; ch++) {
+        bool on = ads131m08_get_channel_enable(1, ch);
+        if (on) {
+            len += snprintf(buf + len, 32768 - len,
+                "<tr><td>%s</td><td>%ld</td>"
+                "<td><form method='POST' action='/control' style='display:inline;margin:0;'>"
+                "<input type='hidden' name='action' value='calib_ch'>"
+                "<input type='hidden' name='adc' value='1'>"
+                "<input type='hidden' name='ch' value='%d'>"
+                "<button type='submit'>Cal</button></form></td></tr>",
+                ads131m08_ch_name_adc1(ch), adc1[ch], ch);
+        } else {
+            len += snprintf(buf + len, 32768 - len,
+                "<tr class='off-row'><td>%s</td><td>-</td><td></td></tr>",
+                ads131m08_ch_name_adc1(ch));
+        }
     }
     // ADC2 ch0~3 : common3~6
-    for (int ch = 0; ch <= 3 && len < 20480 - 150; ch++) {
-        len += snprintf(buf + len, 20480 - len,
-            "<tr><td>%s</td><td>%ld</td>"
-            "<td><form method='POST' action='/control' style='display:inline;margin:0;'>"
-            "<input type='hidden' name='action' value='calib_ch'>"
-            "<input type='hidden' name='adc' value='2'>"
-            "<input type='hidden' name='ch' value='%d'>"
-            "<button type='submit'>Cal</button></form></td></tr>",
-            ads131m08_ch_name_adc2(ch), adc2[ch], ch);
+    for (int ch = 0; ch <= 3 && len < 32768 - 180; ch++) {
+        bool on = ads131m08_get_channel_enable(2, ch);
+        if (on) {
+            len += snprintf(buf + len, 32768 - len,
+                "<tr><td>%s</td><td>%ld</td>"
+                "<td><form method='POST' action='/control' style='display:inline;margin:0;'>"
+                "<input type='hidden' name='action' value='calib_ch'>"
+                "<input type='hidden' name='adc' value='2'>"
+                "<input type='hidden' name='ch' value='%d'>"
+                "<button type='submit'>Cal</button></form></td></tr>",
+                ads131m08_ch_name_adc2(ch), adc2[ch], ch);
+        } else {
+            len += snprintf(buf + len, 32768 - len,
+                "<tr class='off-row'><td>%s</td><td>-</td><td></td></tr>",
+                ads131m08_ch_name_adc2(ch));
+        }
     }
-    len += snprintf(buf + len, 20480 - len,
+    len += snprintf(buf + len, 32768 - len,
         "</table></div></div>"
         "<div class='box'><h2>3-phase (100 ms)</h2>"
         "<table><tr><th>Ph</th><th>Vrms</th><th>Irms</th><th>kW</th><th>PF</th></tr>"
@@ -464,7 +558,7 @@ void webserver_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.stack_size = 20480;
+    config.stack_size = 32768;
     config.max_uri_handlers = 8;
     config.max_req_hdr_len = 1024;   // increase to avoid 431
     config.max_uri_len = 512;

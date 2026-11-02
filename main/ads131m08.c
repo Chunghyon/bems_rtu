@@ -11,6 +11,8 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 static const char *TAG = "ads131";
 
@@ -144,6 +146,52 @@ static uint16_t ads131m08_osr_to_clock(uint16_t osr, bool channels_on)
     return val;
 }
 
+static uint8_t g_ch_en_adc1 = 0xFF;
+static uint8_t g_ch_en_adc2 = 0xFF;
+static volatile bool adc_paused = false;
+
+static void ads131m08_apply_channel_enable(int adc)
+{
+    uint16_t base = ads131m08_osr_to_clock(PP_ADC_OSR, false);
+    uint8_t en = (adc == 1) ? g_ch_en_adc1 : g_ch_en_adc2;
+    uint16_t val = base | ((uint16_t)en << 8);
+    if (adc == 1) ads131m08_write_reg(adc1_spi, ADC1_SPI_CS, 0x03, val);
+    else          ads131m08_write_reg(adc2_spi, ADC2_SPI_CS, 0x03, val);
+}
+
+void ads131m08_set_channel_enable(int adc, int ch, bool enable)
+{
+    if (ch < 0 || ch >= 8) return;
+    adc_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(30));
+    if (adc == 1) {
+        if (enable) g_ch_en_adc1 |= (1u << ch);
+        else        g_ch_en_adc1 &= ~(1u << ch);
+        ads131m08_apply_channel_enable(1);
+    } else if (adc == 2) {
+        if (enable) g_ch_en_adc2 |= (1u << ch);
+        else        g_ch_en_adc2 &= ~(1u << ch);
+        ads131m08_apply_channel_enable(2);
+    }
+    // Save to NVS
+    nvs_handle_t h;
+    if (nvs_open("rtu_cfg", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "ch_en1", g_ch_en_adc1);
+        nvs_set_u8(h, "ch_en2", g_ch_en_adc2);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    adc_paused = false;
+    ESP_LOGI(TAG, "ADC%d CH%d %s", adc, ch, enable ? "ON" : "OFF");
+}
+
+bool ads131m08_get_channel_enable(int adc, int ch)
+{
+    if (ch < 0 || ch >= 8) return false;
+    uint8_t en = (adc == 1) ? g_ch_en_adc1 : g_ch_en_adc2;
+    return (en & (1u << ch)) != 0;
+}
+
 static int32_t adc1_offset[ADS131M08_NUM_CH] = {0};
 static int32_t adc2_offset[ADS131M08_NUM_CH] = {0};
 
@@ -257,9 +305,6 @@ void ads131m08_get_voltage_channels(int *ch0, int *ch1, int *ch2)
 }
 
 // ---- NVS persistence ----
-#include "nvs_flash.h"
-#include "nvs.h"
-
 #define NVS_NS_RTU   "rtu_cfg"
 #define NVS_KEY_CSRC "cur_src"
 
@@ -303,6 +348,10 @@ void ads131m08_nvs_load(void)
                  g_voltage_ch[0], g_voltage_ch[1], g_voltage_ch[2],
                  (g_phase_mode == POWER_MODE_SINGLE) ? "SINGLE" : "THREE");
     }
+    uint8_t en1 = 0xFF, en2 = 0xFF;
+    if (nvs_get_u8(h, "ch_en1", &en1) == ESP_OK) g_ch_en_adc1 = en1;
+    if (nvs_get_u8(h, "ch_en2", &en2) == ESP_OK) g_ch_en_adc2 = en2;
+    ESP_LOGI(TAG, "Loaded channel enable: ADC1=0x%02X ADC2=0x%02X", g_ch_en_adc1, g_ch_en_adc2);
     // Load calibration offsets if present
     size_t olen = sizeof(adc1_offset);
     if (nvs_get_blob(h, "adc1_off", adc1_offset, &olen) == ESP_OK && olen == sizeof(adc1_offset)) {
@@ -314,8 +363,6 @@ void ads131m08_nvs_load(void)
     }
     nvs_close(h);
 }
-
-static volatile bool adc_paused = false;
 
 static void IRAM_ATTR drdy_isr_handler(void *arg)
 {
@@ -517,6 +564,9 @@ void ads131m08_init(void)
 
     ads131m08_write_reg(adc1_spi, ADC1_SPI_CS, 0x03, clk_on);
     ads131m08_write_reg(adc2_spi, ADC2_SPI_CS, 0x03, clk_on);
+    // Apply persisted channel enable
+    ads131m08_apply_channel_enable(1);
+    ads131m08_apply_channel_enable(2);
 
     ESP_LOGI(TAG, "ADS131M08 init done (OSR=%d)", PP_ADC_OSR);
 

@@ -114,6 +114,10 @@ void ads131m08_calibrate_measure(uint16_t samples);
 // Calibrate a single channel (adc: 1=ADC1, 2=ADC2; ch: 0~7)
 void ads131m08_calibrate_channel(int adc, int ch, uint16_t samples);
 
+// Channel enable control (adc: 1 or 2, ch: 0~7, enable: true/false)
+void ads131m08_set_channel_enable(int adc, int ch, bool enable);
+bool ads131m08_get_channel_enable(int adc, int ch);
+
 // Phase mode control (default: POWER_MODE_THREE)
 void ads131m08_set_phase_mode(power_phase_mode_t mode);
 power_phase_mode_t ads131m08_get_phase_mode(void);
