@@ -303,6 +303,15 @@ void ads131m08_nvs_load(void)
                  g_voltage_ch[0], g_voltage_ch[1], g_voltage_ch[2],
                  (g_phase_mode == POWER_MODE_SINGLE) ? "SINGLE" : "THREE");
     }
+    // Load calibration offsets if present
+    size_t olen = sizeof(adc1_offset);
+    if (nvs_get_blob(h, "adc1_off", adc1_offset, &olen) == ESP_OK && olen == sizeof(adc1_offset)) {
+        ESP_LOGI(TAG, "Loaded ADC1 offsets from NVS");
+    }
+    olen = sizeof(adc2_offset);
+    if (nvs_get_blob(h, "adc2_off", adc2_offset, &olen) == ESP_OK && olen == sizeof(adc2_offset)) {
+        ESP_LOGI(TAG, "Loaded ADC2 offsets from NVS");
+    }
     nvs_close(h);
 }
 
@@ -358,7 +367,7 @@ static void ads131m08_calibrate_reserved(uint16_t samples)
     }
 
     ESP_LOGI(TAG, "RESERVED offset calibration done (%u samples)", samples);
-    ESP_LOGI(TAG, "  RESERVED offsets: %ld %ld %ld %ld",
+    ESP_LOGI(TAG, "  ADC2 reserved offsets: %ld %ld %ld %ld",
              adc2_offset[4], adc2_offset[5], adc2_offset[6], adc2_offset[7]);
 }
 
@@ -399,8 +408,63 @@ void ads131m08_calibrate_measure(uint16_t samples)
     ESP_LOGI(TAG, "  ADC1 offsets: %ld %ld %ld %ld %ld %ld %ld %ld",
              adc1_offset[0], adc1_offset[1], adc1_offset[2], adc1_offset[3],
              adc1_offset[4], adc1_offset[5], adc1_offset[6], adc1_offset[7]);
-    ESP_LOGI(TAG, "  ADC2 COMMON offsets: %ld %ld %ld %ld",
-             adc2_offset[0], adc2_offset[1], adc2_offset[2], adc2_offset[3]);
+    ESP_LOGI(TAG, "  ADC2 offsets: %ld %ld %ld %ld %ld %ld %ld %ld",
+             adc2_offset[0], adc2_offset[1], adc2_offset[2], adc2_offset[3],
+             adc2_offset[4], adc2_offset[5], adc2_offset[6], adc2_offset[7]);
+
+    // Save offsets to NVS so they survive reboot
+    nvs_handle_t h;
+    if (nvs_open("rtu_cfg", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_blob(h, "adc1_off", adc1_offset, sizeof(adc1_offset));
+        nvs_set_blob(h, "adc2_off", adc2_offset, sizeof(adc2_offset));
+        nvs_commit(h);
+        nvs_close(h);
+        ESP_LOGI(TAG, "Offsets saved to NVS");
+    }
+}
+
+void ads131m08_calibrate_channel(int adc, int ch, uint16_t samples)
+{
+    if (samples == 0 || ch < 0 || ch >= ADS131M08_NUM_CH) return;
+    if (adc != 1 && adc != 2) return;
+
+    int64_t sum = 0;
+    int32_t buf[ADS131M08_NUM_CH];
+
+    adc_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    // Clear this channel's offset first so we read raw-ish values
+    if (adc == 1) adc1_offset[ch] = 0;
+    else          adc2_offset[ch] = 0;
+
+    for (uint16_t i = 0; i < samples; i++) {
+        if (adc == 1) {
+            ads131m08_read_frame(adc1_spi, ADC1_SPI_CS, buf);
+        } else {
+            ads131m08_read_frame(adc2_spi, ADC2_SPI_CS, buf);
+        }
+        sum += buf[ch];
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    int32_t off = (int32_t)(sum / samples);
+    if (adc == 1) adc1_offset[ch] = off;
+    else          adc2_offset[ch] = off;
+
+    adc_paused = false;
+
+    ESP_LOGI(TAG, "Channel calibration done: ADC%d ch%d offset=%ld (%u samples)",
+             adc, ch, (long)off, samples);
+
+    // Save both offset arrays
+    nvs_handle_t h;
+    if (nvs_open("rtu_cfg", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_blob(h, "adc1_off", adc1_offset, sizeof(adc1_offset));
+        nvs_set_blob(h, "adc2_off", adc2_offset, sizeof(adc2_offset));
+        nvs_commit(h);
+        nvs_close(h);
+    }
 }
 
 void ads131m08_init(void)

@@ -106,6 +106,14 @@ void pca9555_set_pin(pca9555_port_t pin, int level)
     pca9555_flush_outputs();
 }
 
+int pca9555_get_pin(pca9555_port_t pin)
+{
+    if (pin >= PCA_PORT_COUNT) return 0;
+    uint8_t bit = 1u << (pin & 7);
+    if (pin < 8) return (port0_cache & bit) ? 1 : 0;
+    return (port1_cache & bit) ? 1 : 0;
+}
+
 // common_idx: 1~6
 // term_49r9: 1=use 49.9ohm (CUR_SEL=0), 0=open (CUR_SEL=1)
 // r_49k9:    1=49.9k (10V_SEL=0), 0=99.8k (10V_SEL=1)

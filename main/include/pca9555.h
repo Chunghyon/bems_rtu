@@ -64,6 +64,9 @@ void pca9555_deselect_all(void);
 // Individual pin control (0 or 1)
 void pca9555_set_pin(pca9555_port_t pin, int level);
 
+// Get current cached output level of a pin (0 or 1)
+int pca9555_get_pin(pca9555_port_t pin);
+
 // Convenience for common channel configuration
 // common 1~2 use 10V_SEL + CUR_SEL; common 3~6 also use DI_SEL
 // term_49r9: 1 = 49.9ohm termination (CUR_SEL=0), 0 = open (CUR_SEL=1)
