@@ -13,6 +13,19 @@
 
 static const char *TAG = "web";
 
+// Show raw (average) value, and V/A as RMS
+static void format_eng_rms(char *buf, size_t n, float rms_counts, bool is_current, int ch_code)
+{
+    if (is_current) {
+        float scale = (ch_code >= 0 && ch_code <= 2) ? PP_I_PER_COUNT_10OHM : PP_I_PER_COUNT_49R9;
+        float a = rms_counts * scale;
+        snprintf(buf, n, "%.4f A", a);
+    } else {
+        float v = rms_counts * PP_V_PER_COUNT;
+        snprintf(buf, n, "%.4f V", v);
+    }
+}
+
 bool web_update_enabled = false;
 int  web_update_period_sec = 5;
 
@@ -210,6 +223,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     int32_t adc1[ADS131M08_NUM_CH] = {0};
     int32_t adc2[ADS131M08_NUM_CH] = {0};
     ads131m08_get_avg(adc1, adc2);
+    float rms1[ADS131M08_NUM_CH] = {0}, rms2[ADS131M08_NUM_CH] = {0};
+    ads131m08_get_rms(rms1, rms2);
 
     float vrms[3], irms[3], kw[3], pf[3];
     uint32_t sps = 0;
@@ -386,19 +401,12 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 
         char mode = 'c';
         char range = (v_level == 1) ? 'l' : 'h';   // 1=49.9k=Low, 0=99.8k=High
-        const char *di_txt = "-";
-        const char *cur_txt = (cur_level == 1) ? "NO(49.9Ω)" : "NC(open)";
-        const char *v_txt = (v_level == 1) ? "NO(49.9k)" : "NC(99.8k)";
         if (cm >= 3 && di_level == 1) {
             mode = 'd';
-            di_txt = "NO";
-            cur_txt = "x";   // don't care
         } else if (cur_level == 1) {
             mode = 'c';
-            di_txt = (cm >= 3) ? "NC" : "-";
         } else {
             mode = 'v';
-            di_txt = (cm >= 3) ? "NC" : "-";
         }
 
         // C1~C2 dim when corresponding ADC1 CH6/CH7 is OFF
@@ -510,17 +518,20 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<div class='box cv-box'><h2>Current/Voltage</h2><table><tr><th>CH</th><th>Value</th><th></th></tr>");
 
     // ADC1 ch0~5 : current + voltage
-    for (int ch = 0; ch <= 5 && len < 32768 - 180; ch++) {
+    for (int ch = 0; ch <= 5 && len < 32768 - 200; ch++) {
         bool on = ads131m08_get_channel_enable(1, ch);
         if (on) {
+            char eng[24];
+            bool is_cur = (ch <= 2);
+            format_eng_rms(eng, sizeof(eng), rms1[ch], is_cur, ch);
             len += snprintf(buf + len, 32768 - len,
-                "<tr><td>%s</td><td>%ld</td>"
+                "<tr><td>%s</td><td>%ld <small>(%s)</small></td>"
                 "<td><form method='POST' action='/control' style='display:inline;margin:0;'>"
                 "<input type='hidden' name='action' value='calib_ch'>"
                 "<input type='hidden' name='adc' value='1'>"
                 "<input type='hidden' name='ch' value='%d'>"
                 "<button type='submit'>Cal</button></form></td></tr>",
-                ads131m08_ch_name_adc1(ch), adc1[ch], ch);
+                ads131m08_ch_name_adc1(ch), adc1[ch], eng, ch);
         } else {
             len += snprintf(buf + len, 32768 - len,
                 "<tr class='off-row'><td>%s</td><td>-</td><td></td></tr>",
@@ -531,17 +542,23 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<div class='box common-box'><h2>Common</h2><table><tr><th>CH</th><th>Value</th><th></th></tr>");
 
     // ADC1 ch6~7 : common1~2
-    for (int ch = 6; ch <= 7 && len < 32768 - 180; ch++) {
+    for (int ch = 6; ch <= 7 && len < 32768 - 200; ch++) {
         bool on = ads131m08_get_channel_enable(1, ch);
         if (on) {
+            // Determine current vs voltage from CUR_SEL
+            pca9555_port_t cur_port = (pca9555_port_t)(PCA_CUR_SEL1 + (ch - 6));
+            int cur_level = pca9555_get_pin(cur_port);
+            bool is_cur = (cur_level == 1);
+            char eng[24];
+            format_eng_rms(eng, sizeof(eng), rms1[ch], is_cur, 8 + (ch - 6));
             len += snprintf(buf + len, 32768 - len,
-                "<tr><td>%s</td><td>%ld</td>"
+                "<tr><td>%s</td><td>%ld <small>(%s)</small></td>"
                 "<td><form method='POST' action='/control' style='display:inline;margin:0;'>"
                 "<input type='hidden' name='action' value='calib_ch'>"
                 "<input type='hidden' name='adc' value='1'>"
                 "<input type='hidden' name='ch' value='%d'>"
                 "<button type='submit'>Cal</button></form></td></tr>",
-                ads131m08_ch_name_adc1(ch), adc1[ch], ch);
+                ads131m08_ch_name_adc1(ch), adc1[ch], eng, ch);
         } else {
             len += snprintf(buf + len, 32768 - len,
                 "<tr class='off-row'><td>%s</td><td>-</td><td></td></tr>",
@@ -549,17 +566,22 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         }
     }
     // ADC2 ch0~3 : common3~6
-    for (int ch = 0; ch <= 3 && len < 32768 - 180; ch++) {
+    for (int ch = 0; ch <= 3 && len < 32768 - 200; ch++) {
         bool on = ads131m08_get_channel_enable(2, ch);
         if (on) {
+            pca9555_port_t cur_port = (pca9555_port_t)(PCA_CUR_SEL1 + 2 + ch);
+            int cur_level = pca9555_get_pin(cur_port);
+            bool is_cur = (cur_level == 1);
+            char eng[24];
+            format_eng_rms(eng, sizeof(eng), rms2[ch], is_cur, 10 + ch);
             len += snprintf(buf + len, 32768 - len,
-                "<tr><td>%s</td><td>%ld</td>"
+                "<tr><td>%s</td><td>%ld <small>(%s)</small></td>"
                 "<td><form method='POST' action='/control' style='display:inline;margin:0;'>"
                 "<input type='hidden' name='action' value='calib_ch'>"
                 "<input type='hidden' name='adc' value='2'>"
                 "<input type='hidden' name='ch' value='%d'>"
                 "<button type='submit'>Cal</button></form></td></tr>",
-                ads131m08_ch_name_adc2(ch), adc2[ch], ch);
+                ads131m08_ch_name_adc2(ch), adc2[ch], eng, ch);
         } else {
             len += snprintf(buf + len, 32768 - len,
                 "<tr class='off-row'><td>%s</td><td>-</td><td></td></tr>",

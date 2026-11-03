@@ -25,6 +25,8 @@ static void print_console_help(void)
     ESP_LOGI(TAG, "  z/Z : toggle phase log");
     ESP_LOGI(TAG, "  p/P : set web period (1~300s, NVS)");
     ESP_LOGI(TAG, "  c/C : manual ADC calibration");
+    ESP_LOGI(TAG, "  d/D : capture 128 samples of ADC channel");
+    ESP_LOGI(TAG, "  g/G : ADC diagnostic (registers, offsets, range)");
     ESP_LOGI(TAG, "  m/M : set phase mode (1=single, 3=three, NVS)");
     ESP_LOGI(TAG, "  k/K : config common channel (c/v/d, NVS)");
     ESP_LOGI(TAG, "  i/I : set current source channels (0-15, NVS)");
@@ -111,6 +113,36 @@ static void task_console(void *arg)
                     ESP_LOGI(TAG, "Web update period set to %d seconds (saved to NVS)", web_update_period_sec);
                 } else {
                     ESP_LOGI(TAG, "Invalid value '%s' (must be 1~300). Period unchanged (%ds)", numbuf, web_update_period_sec);
+                }
+                break;
+            }
+            case 'g':
+            case 'G': {
+                ESP_LOGI(TAG, "ADC diag: enter 1 or 2");
+                char buf[8] = {0};
+                if (!read_line_esc(buf, sizeof(buf))) break;
+                int adc = atoi(buf);
+                if (adc == 1 || adc == 2) ads131m08_diag(adc);
+                else ESP_LOGI(TAG, "Enter 1 or 2");
+                break;
+            }
+            case 'd':
+            case 'D': {
+                ESP_LOGI(TAG, "ADC capture: enter '<adc 1|2> <ch 0-7>' or ESC");
+                char buf[16] = {0};
+                if (!read_line_esc(buf, sizeof(buf))) break;
+                int adc = 0, ch = 0;
+                if (sscanf(buf, "%d %d", &adc, &ch) == 2 &&
+                    (adc == 1 || adc == 2) && ch >= 0 && ch <= 7) {
+                    int32_t samples[128];
+                    int n = ads131m08_capture(adc, ch, samples, 128);
+                    ESP_LOGI(TAG, "Captured %d samples ADC%d CH%d:", n, adc, ch);
+                    for (int i = 0; i < n; i++) {
+                        float v = samples[i] * PP_V_PER_COUNT;
+                        ESP_LOGI(TAG, "  [%3d] %8ld  (%7.3f V)", i, (long)samples[i], v);
+                    }
+                } else {
+                    ESP_LOGI(TAG, "Format: <1|2> <0-7>");
                 }
                 break;
             }
@@ -253,7 +285,7 @@ static void task_console(void *arg)
             case '\r':
                 break;
             default:
-                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use a,w,p,c,m,z,k,i,v,r or / for help", c, c);
+                ESP_LOGI(TAG, "Unknown key '%c' (0x%02X). Use a,w,p,c,m,z,k,i,v,r,d or / for help", c, c);
                 break;
         }
     }

@@ -199,11 +199,21 @@ static int32_t adc1_latest[ADS131M08_NUM_CH] = {0};
 static int64_t adc1_sum[ADS131M08_NUM_CH] = {0};
 static uint32_t adc1_sample_count = 0;
 static int32_t adc1_avg[ADS131M08_NUM_CH] = {0};
+static int64_t adc1_sumsq[ADS131M08_NUM_CH] = {0};
+static float adc1_rms[ADS131M08_NUM_CH] = {0};
 
 static int32_t adc2_latest[ADS131M08_NUM_CH] = {0};
 static int64_t adc2_sum[ADS131M08_NUM_CH] = {0};
+static int64_t adc2_sumsq[ADS131M08_NUM_CH] = {0};
 static uint32_t adc2_sample_count = 0;
 static int32_t adc2_avg[ADS131M08_NUM_CH] = {0};
+static float adc2_rms[ADS131M08_NUM_CH] = {0};
+
+static volatile bool cap_active = false;
+static volatile int cap_adc = 1;
+static volatile int cap_ch = 0;
+static volatile int cap_count = 0;
+static int32_t cap_buf[128];
 
 static SemaphoreHandle_t drdy_sem = NULL;
 
@@ -608,6 +618,7 @@ static void task_ads131m08(void *arg)
         ads131m08_read_frame(adc1_spi, ADC1_SPI_CS, adc1_ch);
         for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
             adc1_sum[ch] += adc1_ch[ch];
+            adc1_sumsq[ch] += (int64_t)adc1_ch[ch] * adc1_ch[ch];
             adc1_latest[ch] = adc1_ch[ch];
         }
         adc1_sample_count++;
@@ -615,9 +626,16 @@ static void task_ads131m08(void *arg)
         ads131m08_read_frame(adc2_spi, ADC2_SPI_CS, adc2_ch);
         for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
             adc2_sum[ch] += adc2_ch[ch];
+            adc2_sumsq[ch] += (int64_t)adc2_ch[ch] * adc2_ch[ch];
             adc2_latest[ch] = adc2_ch[ch];
         }
         adc2_sample_count++;
+
+        if (cap_active && cap_count < 128) {
+            int32_t v = (cap_adc == 1) ? adc1_ch[cap_ch] : adc2_ch[cap_ch];
+            cap_buf[cap_count++] = v;
+            if (cap_count >= 128) cap_active = false;
+        }
 
         {
             power_sample_t s = {
@@ -646,7 +664,13 @@ static void task_ads131m08(void *arg)
             if (adc1_sample_count > 0) {
                 for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
                     adc1_avg[ch] = (int32_t)(adc1_sum[ch] / adc1_sample_count);
+                    double mean = (double)adc1_avg[ch];
+                    double mean_sq = (double)adc1_sumsq[ch] / adc1_sample_count;
+                    double var = mean_sq - mean * mean;
+                    if (var < 0) var = 0;
+                    adc1_rms[ch] = (float)sqrt(var);
                     adc1_sum[ch] = 0;
+                    adc1_sumsq[ch] = 0;
                 }
                 if (adc_log_enabled) {
                     ESP_LOGI(TAG, "  ==============================================");
@@ -662,7 +686,13 @@ static void task_ads131m08(void *arg)
             if (adc2_sample_count > 0) {
                 for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
                     adc2_avg[ch] = (int32_t)(adc2_sum[ch] / adc2_sample_count);
+                    double mean = (double)adc2_avg[ch];
+                    double mean_sq = (double)adc2_sumsq[ch] / adc2_sample_count;
+                    double var = mean_sq - mean * mean;
+                    if (var < 0) var = 0;
+                    adc2_rms[ch] = (float)sqrt(var);
                     adc2_sum[ch] = 0;
+                    adc2_sumsq[ch] = 0;
                 }
                 if (adc_log_enabled) {
                     for (int ch = 0; ch < ADS131M08_NUM_CH; ch++) {
@@ -697,6 +727,8 @@ static void task_power_calc(void *arg)
 
         if (n >= 8) {
             int phases = (g_phase_mode == POWER_MODE_SINGLE) ? 1 : POWER_PHASES;
+            double sum_v[POWER_PHASES] = {0};
+            double sum_i[POWER_PHASES] = {0};
             double sum_v2[POWER_PHASES] = {0};
             double sum_i2[POWER_PHASES] = {0};
             double sum_p[POWER_PHASES] = {0};
@@ -704,16 +736,30 @@ static void task_power_calc(void *arg)
             int32_t prev_v = 0;
             bool first = true;
 
+            // First pass: means
             for (uint32_t k = now - n; k < now; k++) {
                 const power_sample_t *s = &power_ring[k % POWER_RING_SIZE];
                 for (int p = 0; p < phases; p++) {
-                    double v = (double)s->v[p] * PP_V_PER_COUNT;
-                    double i = (double)s->i[p] * get_i_scale_for_ch(g_current_ch[p]);
+                    sum_v[p] += (double)s->v[p] * PP_V_PER_COUNT;
+                    sum_i[p] += (double)s->i[p] * get_i_scale_for_ch(g_current_ch[p]);
+                }
+            }
+            double mean_v[POWER_PHASES], mean_i[POWER_PHASES];
+            for (int p = 0; p < phases; p++) {
+                mean_v[p] = sum_v[p] / n;
+                mean_i[p] = sum_i[p] / n;
+            }
+
+            // Second pass: AC RMS and power (DC removed)
+            for (uint32_t k = now - n; k < now; k++) {
+                const power_sample_t *s = &power_ring[k % POWER_RING_SIZE];
+                for (int p = 0; p < phases; p++) {
+                    double v = (double)s->v[p] * PP_V_PER_COUNT - mean_v[p];
+                    double i = (double)s->i[p] * get_i_scale_for_ch(g_current_ch[p]) - mean_i[p];
                     sum_v2[p] += v * v;
                     sum_i2[p] += i * i;
                     sum_p[p] += v * i;
                 }
-                // Zero-crossing on phase 1 voltage for frequency
                 int32_t v1 = s->v[0];
                 if (!first && prev_v < 0 && v1 >= 0) zc_count++;
                 prev_v = v1;
@@ -793,6 +839,57 @@ void ads131m08_get_avg(int32_t adc1[ADS131M08_NUM_CH], int32_t adc2[ADS131M08_NU
 {
     if (adc1) memcpy(adc1, adc1_avg, sizeof(adc1_avg));
     if (adc2) memcpy(adc2, adc2_avg, sizeof(adc2_avg));
+}
+
+void ads131m08_get_rms(float adc1[ADS131M08_NUM_CH], float adc2[ADS131M08_NUM_CH])
+{
+    if (adc1) memcpy(adc1, adc1_rms, sizeof(adc1_rms));
+    if (adc2) memcpy(adc2, adc2_rms, sizeof(adc2_rms));
+}
+
+int ads131m08_capture(int adc, int ch, int32_t *buf, int max_samples)
+{
+    if (!buf || max_samples <= 0 || ch < 0 || ch >= 8) return 0;
+    if (adc != 1 && adc != 2) return 0;
+    int n = (max_samples > 128) ? 128 : max_samples;
+    cap_adc = adc;
+    cap_ch = ch;
+    cap_count = 0;
+    cap_active = true;
+    for (int i = 0; i < 200 && cap_active; i++) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    cap_active = false;
+    int got = cap_count;
+    if (got > n) got = n;
+    memcpy(buf, cap_buf, got * sizeof(int32_t));
+    return got;
+}
+
+void ads131m08_diag(int adc)
+{
+    spi_device_handle_t dev = (adc == 1) ? adc1_spi : adc2_spi;
+    gpio_num_t cs = (adc == 1) ? ADC1_SPI_CS : ADC2_SPI_CS;
+    const int32_t *off = (adc == 1) ? adc1_offset : adc2_offset;
+    if (!dev) return;
+
+    adc_paused = true;
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    uint16_t id   = ads131m08_read_reg(dev, cs, 0x00);
+    uint16_t mode = ads131m08_read_reg(dev, cs, 0x02);
+    uint16_t clk  = ads131m08_read_reg(dev, cs, 0x03);
+    uint16_t gain = ads131m08_read_reg(dev, cs, 0x04);
+
+    adc_paused = false;
+
+    ESP_LOGI(TAG, "=== ADC%d DIAG ===", adc);
+    ESP_LOGI(TAG, "ID=0x%04X MODE=0x%04X CLOCK=0x%04X GAIN=0x%04X", id, mode, clk, gain);
+    ESP_LOGI(TAG, "Full-scale (gain1) = ±1.2V = ±8388608 counts");
+    ESP_LOGI(TAG, "Offsets: %ld %ld %ld %ld %ld %ld %ld %ld",
+             (long)off[0], (long)off[1], (long)off[2], (long)off[3],
+             (long)off[4], (long)off[5], (long)off[6], (long)off[7]);
+    ESP_LOGI(TAG, "If P=2.5±0.7V and N=GND, differential=1.8~3.2V (>> ±1.2V) → front-end saturates");
 }
 
 void ads131m08_get_power(float vrms[3], float irms[3], float kw[3], float pf[3], uint32_t *sps)

@@ -34,7 +34,7 @@
 #define PP_BEMS_PERIOD_SEC		5       // publish interval (1~5 s)
 // Scale: ADC LSB (≈1.2 V / 2^23) × PT or CT ratio. Tune to the front-end.
 #define PP_ADC_LSB_V			(1.2f / 8388608.0f)
-#define PP_PT_RATIO				1.0f    // primary volts / ADC-pin volt  (tune per ZMPT / onboard)
+#define PP_PT_RATIO				1018.0f  // primary volts / ADC-pin volt  (ZMPT101B / XY-607)
 
 // Burden resistors
 #define BURDEN_ADC1_CH0_2_OHM       10.0f    // ADC1 ch0~2 fixed pull-down
@@ -42,16 +42,12 @@
 
 // CT ratio: primary amps / ADC-pin volt. Tune PP_CT_RATIO_10OHM to your CT + 10ohm.
 // 49.9ohm version is derived (inverse to burden). Adjust independently if needed.
-#define PP_CT_RATIO_10OHM           1.0f
+#define PP_CT_RATIO_10OHM           100.0f
 #define PP_CT_RATIO_49R9            (PP_CT_RATIO_10OHM * BURDEN_ADC1_CH0_2_OHM / BURDEN_COMMON_CUR_OHM)
 
 #define PP_V_PER_COUNT			(PP_ADC_LSB_V * PP_PT_RATIO)
 #define PP_I_PER_COUNT_10OHM    (PP_ADC_LSB_V * PP_CT_RATIO_10OHM)
 #define PP_I_PER_COUNT_49R9     (PP_ADC_LSB_V * PP_CT_RATIO_49R9)
-
-// Legacy (kept for compatibility; prefer the burden-specific ones)
-#define PP_CT_RATIO				PP_CT_RATIO_10OHM
-#define PP_I_PER_COUNT			PP_I_PER_COUNT_10OHM
 
 #ifdef __cplusplus
 extern "C" {
@@ -141,6 +137,14 @@ void ads131m08_nvs_save(void);
 // Getters for web / modbus
 // In SINGLE mode, only index [0] is valid; [1] and [2] are zeroed.
 void ads131m08_get_avg(int32_t adc1[ADS131M08_NUM_CH], int32_t adc2[ADS131M08_NUM_CH]);
+void ads131m08_get_rms(float adc1[ADS131M08_NUM_CH], float adc2[ADS131M08_NUM_CH]);
+
+// Capture 128 consecutive samples of one channel (adc: 1 or 2, ch: 0~7)
+// Returns number of samples captured
+int ads131m08_capture(int adc, int ch, int32_t *buf, int max_samples);
+
+// Diagnostic: read key registers and report
+void ads131m08_diag(int adc);
 void ads131m08_get_power(float vrms[3], float irms[3], float kw[3], float pf[3], uint32_t *sps);
 void ads131m08_get_power_ext(float kvar[3], float kva[3], float kwh[3], float *freq);
 
